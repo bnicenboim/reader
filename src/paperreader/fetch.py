@@ -114,6 +114,7 @@ class Fetcher:
         if found is None:
             raise FetchFailed(paper, run.attempts, self._hints(run))
         self._complete_metadata(run)
+        self._arxiv_year(run, found)
         return self._store(paper, found)
 
     def resolve(self, ident: Identifier) -> tuple[Paper, list[Candidate]]:
@@ -298,6 +299,22 @@ class Fetcher:
         host = proxy_host(self.config) or ""
         base = host.split(".", 1)[1] if host.startswith("login.") else host
         return bool(base) and (urlsplit(url).hostname or "").endswith(base)
+
+    def _arxiv_year(self, run: _Run, found: Found) -> None:
+        """For a copy from arXiv, take the year from arXiv.
+
+        OpenAlex sometimes merges a paper with later reposts and reports their year
+        (e.g. 2025 for "Attention Is All You Need").
+        """
+        if not (run.paper.arxiv and (urlsplit(found.url).hostname or "").endswith("arxiv.org")):
+            return
+        try:
+            year = sources.arxiv_year(self.client, run.paper.arxiv)
+        except (httpx.HTTPError, HTTPError, RateLimited, QuotaExceeded, SyntaxError) as e:
+            self.log(f"  {'failed':8} {'api':7} {'arxiv_year':16} ({e})")
+            return
+        if year:
+            run.paper.year = year
 
     def _complete_metadata(self, run: _Run) -> None:
         """The full text may have turned up before any metadata lookup ran. (Repeat lookups hit the cache.)"""

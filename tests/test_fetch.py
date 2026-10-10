@@ -144,3 +144,31 @@ def test_resolve_lists_candidates_without_downloading(config, client, router):
     assert "https://www.nature.com/articles/nature14539.pdf" in urls
     assert "https://login.proxy.example.edu/login?url=https://doi.org/10.1038/nature14539" in urls
     assert all("hal.science" not in u for u in router.urls())
+
+
+ARXIV_ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry>
+<title>Attention Is All You Need</title><published>2017-06-12T17:57:34Z</published>
+<author><name>Ashish Vaswani</name></author></entry></feed>"""
+
+
+def test_year_of_an_arxiv_copy_comes_from_arxiv(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(publication_year=2025, locations=[
+        {"is_oa": True, "landing_page_url": "http://arxiv.org/abs/1706.03762"},
+    ]))
+    router.add("https://export.arxiv.org/api/query", content=ARXIV_ATOM)
+    router.add("https://arxiv.org/pdf/1706.03762", headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert rec.paper.year == 2017
+    assert rec.key == "lecun2017-deep-learning"
+
+
+def test_year_of_a_publisher_copy_is_kept(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "http://arxiv.org/abs/1706.03762"},
+        {"is_oa": True, "pdf_url": "https://www.nature.com/x.pdf", "version": "publishedVersion"},
+    ]))
+    router.add("https://export.arxiv.org/api/query", content=ARXIV_ATOM)
+    router.add("https://www.nature.com/x.pdf", headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert rec.paper.year == 2015
+    assert not any("export.arxiv.org" in u for u in router.urls())

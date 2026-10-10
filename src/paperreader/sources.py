@@ -233,24 +233,38 @@ ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 
 
-def arxiv_metadata(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]:
-    if not paper.arxiv:
-        return []
-    status, body = client.get_cached(ARXIV_API, {"id_list": arxiv_base(paper.arxiv)}, ttl=30 * 86400)
+def _arxiv_entry(client: PoliteClient, arxiv_id: str) -> ET.Element | None:
+    status, body = client.get_cached(ARXIV_API, {"id_list": arxiv_base(arxiv_id)}, ttl=30 * 86400)
     if status != 200:
-        return []
+        return None
     entry = ET.fromstring(body).find(f"{ATOM}entry")
     if entry is None or entry.find(f"{ATOM}title") is None:
-        return []
+        return None
+    return entry
+
+
+def _arxiv_published_year(entry: ET.Element) -> int | None:
     published = entry.findtext(f"{ATOM}published") or ""
+    return int(published[:4]) if published[:4].isdigit() else None
+
+
+def arxiv_metadata(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]:
+    if not paper.arxiv or (entry := _arxiv_entry(client, paper.arxiv)) is None:
+        return []
     paper.update(
         title=" ".join((entry.findtext(f"{ATOM}title") or "").split()),
         authors=[a.findtext(f"{ATOM}name") for a in entry.findall(f"{ATOM}author")],
-        year=int(published[:4]) if published[:4].isdigit() else None,
+        year=_arxiv_published_year(entry),
         venue=entry.findtext(f"{ARXIV_NS}journal_ref") or "arXiv",
         doi=entry.findtext(f"{ARXIV_NS}doi"),
     )
     return []
+
+
+def arxiv_year(client: PoliteClient, arxiv_id: str) -> int | None:
+    """Year of the first arXiv version."""
+    entry = _arxiv_entry(client, arxiv_id)
+    return _arxiv_published_year(entry) if entry is not None else None
 
 
 # --- Europe PMC -------------------------------------------------------------------------------
