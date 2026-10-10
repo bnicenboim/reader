@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .config import Config
-from .html import looks_like_challenge, looks_like_sign_in
+from .html import looks_like_challenge, looks_like_sign_in, refuses_headless
 from .http import Response
 from .ratelimit import RateLimiter
 
@@ -339,8 +339,8 @@ class Browser:
             if html is not None and looks_like_challenge(html, title):
                 status = 403
                 headers[CHALLENGE_HEADER] = "1"
-            elif status == 418 and not self.visible:
-                # IEEE Xplore's answer to headless Chromium; a visible window gets the page.
+            elif not self.visible and refuses_headless(status, html or ""):
+                # IEEE Xplore's and ScienceDirect's answer to headless Chromium; a visible window gets the page.
                 headers[CHALLENGE_HEADER] = "1"
             elif self._signing_in(page.url):
                 status = 401

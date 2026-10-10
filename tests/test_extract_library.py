@@ -4,7 +4,7 @@ from conftest import make_pdf
 from paperreader.browser import load_session_cookies, save_session_cookies
 from paperreader.config import Config
 from paperreader.extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
-from paperreader.html import looks_like_challenge, looks_like_sign_in, parse_page
+from paperreader.html import looks_like_challenge, looks_like_sign_in, parse_page, refuses_headless
 from paperreader.library import Library, base_key
 from paperreader.models import Paper
 from paperreader.publishers import proxied, publisher_pdf_url
@@ -60,6 +60,26 @@ def test_page_metadata():
     assert page.pdf_url == "https://www.nature.com/articles/nature14539.pdf"
     assert page.doi == "10.1038/nature14539"
     assert page.meta["citation_author"] == ["LeCun, Yann", "Bengio, Yoshua"]
+
+
+def test_sciencedirect_pdf_link_comes_from_the_page_data():
+    html = ('<html><head><title>A paper - ScienceDirect</title></head><body><script type="application/json">'
+            '{"article":{"pdfDownload":{"isPdfFullText":false,"urlMetadata":{"queryParams":{"md5":"15be88","pid":'
+            '"1-s2.0-S1364661318301657-main.pdf"},"pii":"S1364661318301657","pdfExtension":"/pdfft",'
+            '"path":"science/article/pii"}},"other":{}}}</script></body></html>')
+    page = parse_page(html, "https://www-sciencedirect-com.proxy.example/science/article/pii/S1364661318301657")
+    assert page.pdf_url == ("https://www-sciencedirect-com.proxy.example/science/article/pii/S1364661318301657"
+                            "/pdfft?md5=15be88&pid=1-s2.0-S1364661318301657-main.pdf")
+    assert parse_page(html.replace('"pdfExtension"', '"other"'), page.url).pdf_url is None
+
+
+def test_refusals_of_headless_chromium():
+    sciencedirect = ("<style>" + "x" * 300_000 + "</style><h1>There was a problem providing the content you "
+                     "requested</h1><p>User Agent: Mozilla/5.0 ... HeadlessChrome/153.0.0.0</p>")
+    assert refuses_headless(403, sciencedirect)
+    assert refuses_headless(418, "")  # IEEE Xplore
+    assert not refuses_headless(403, "<h1>Forbidden</h1>")
+    assert not refuses_headless(200, sciencedirect)
 
 
 def test_challenge_detection():

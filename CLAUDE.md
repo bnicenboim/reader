@@ -108,7 +108,7 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 141 unit tests, all passing, and 24 network tests.
+There are 143 unit tests, all passing, and 24 network tests.
 
 The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
 headless Chromium against a local server (check not completed, mark remembered by the next process,
@@ -116,12 +116,14 @@ tab or browser closed during the wait). It has not been tried on a real site wit
 On 10 October 2026, from the user's desktop: with the browser launched without automation switches (issue #9),
 the checks at www.science.org, pubs.aip.org, cell.com, www.sciencedirect.com and research.tilburguniversity.edu
 were all passed in the visible window, where before none was. Pages see `navigator.webdriver` false, headless and
-visible. The same day doi.org was skipped for Science in a later run, with no window (issue #7).
+visible. The same day doi.org was skipped for Science in a later run, with no window (issue #7), and PDFs came
+through the proxy from Annual Reviews and from ScienceDirect (headless refused, then the visible window).
 The download check (issue #5) finds no mismatch among the 39 papers in the library of 10 October 2026,
 and finds the one known wrong entry.
 
 Not verified:
-- The proxy route for publishers other than IEEE (AIP reached the article page through it).
+- The proxy route for publishers other than IEEE, Annual Reviews and ScienceDirect (AIP reached the article
+  page through it).
 - ScienceDirect blocked the development server's IP, even in the browser.
 - ACM and OpenReview show a Cloudflare check whose verification server was blocked by the
   development sandbox's network, so they failed there. They may work from a normal
@@ -204,8 +206,10 @@ Not verified:
   false, the browser passed them all the same evening. If a site still refuses: the installed Chrome
   (`browser.channel = "chrome"`), the user's own Chrome (`browser.cdp_url`), then a patched driver.
 - ScienceDirect answers headless Chromium (user agent HeadlessChrome) with "There was a problem providing the
-  content you requested" (HTTP 403), also through the proxy; the visible window gets the article page. Its
-  pages have no `citation_pdf_url`, so no PDF is found there yet.
+  content you requested" (HTTP 403, some 770 kB into the page), also through the proxy. Like IEEE's 418 it
+  counts as a bot check (`html.refuses_headless`), and the visible window gets the article page. That page has
+  no `citation_pdf_url`; the PDF link is built from its `"pdfDownload"` data (`/pdfft?md5=..&pid=..`) and
+  redirects to a signed pdf.sciencedirectassets.com URL that expires after 300 s.
 - Annual Reviews has no `citation_pdf_url`; its PDF is the action of a POST form in the page body
   (`/deliver/fulltext/...pdf?...mimeType=pdf`, `html.DELIVER_FORM_RE`), and a GET of it returns the PDF too.
   Its PDFs carry "Downloaded from www.annualreviews.org. <institution> IP: ..." on every page.
