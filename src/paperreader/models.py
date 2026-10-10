@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field, replace
 
 from .identifiers import Identifier, arxiv_base
 
-ID_FIELDS = ("doi", "arxiv", "pmid", "pmcid", "acl", "openreview")
+ID_FIELDS = ("doi", "arxiv", "pmid", "pmcid", "acl", "openreview", "osf")
 
 
 @dataclass
@@ -19,7 +19,14 @@ class Paper:
     pmcid: str | None = None
     acl: str | None = None
     openreview: str | None = None
+    osf: str | None = None  # OSF preprint (PsyArXiv, SocArXiv, ...) or file id
     url: str | None = None  # a URL the user gave that is not one of the ids above
+    # Publication details, from Crossref, for citations.
+    pub_type: str | None = None  # Crossref type: journal-article, proceedings-article, posted-content, ...
+    volume: str | None = None
+    issue: str | None = None
+    pages: str | None = None
+    publisher: str | None = None
 
     @classmethod
     def from_identifier(cls, ident: Identifier) -> Paper:

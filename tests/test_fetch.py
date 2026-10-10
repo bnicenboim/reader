@@ -97,7 +97,6 @@ def test_paywalled_paper_fails_with_hints(config, client, router):
     assert any("browser fallback is off" in h for h in e.value.hints)
 
 
-
 def test_proxy_comes_before_the_publisher_in_the_browser(config, client, router):
     import httpx
 
@@ -123,6 +122,7 @@ def test_proxy_comes_before_the_publisher_in_the_browser(config, client, router)
     assert f._browser.urls == ["https://proxy.example.edu/login?url=https://www.nature.com/articles/nature14539.pdf"]
     assert rec.source["via"] == "browser"
 
+
 def test_bot_wall_is_recognized(config, client, router):
     router.add("https://openreview.net/pdf?id=abc", headers={"content-type": "text/html"},
                content=b"<html><head><title>Just a moment...</title></head></html>")
@@ -143,7 +143,6 @@ def test_meta_refresh_is_followed(config, client, router):
     assert rec.source["url"] == "https://cdn.example/x.pdf"
 
 
-
 def test_ieee_pdf_is_found_by_article_number(config, client, router):
     router.add("https://doi.org/10.1109/icassp.2023.123", status=302,
                headers={"location": "https://ieeexplore.ieee.org/document/123"})
@@ -153,6 +152,7 @@ def test_ieee_pdf_is_found_by_article_number(config, client, router):
                headers={"content-type": "application/pdf"}, content=PDF)
     rec = fetcher(config, client).get(parse("10.1109/icassp.2023.123"))
     assert rec.source["url"] == "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=123"
+
 
 def test_pmc_full_text_xml(config, client, router):
     router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/search", json_body={"resultList": {"result": [{
@@ -269,3 +269,81 @@ def test_search_prefers_arxiv_id_for_preprints(config, client, router):
     hits = openalex_search(client, config, "attention")
     assert [hit_identifier(h) for h in hits] == ["arXiv:1706.03762", "doi:10.1038/nature14539",
                                                  "arXiv:2222.22222", None]
+
+
+BIORXIV_DOI = "10.64898/2026.03.28.715023"
+BIORXIV_API = f"https://api.biorxiv.org/details/biorxiv/{BIORXIV_DOI}"
+BIORXIV_VERSIONS = {"collection": [
+    {"title": "The Richness of Experience", "authors": "Raviv, H.; Chen, B.", "date": "2026-03-31", "version": "1",
+     "jatsxml": "https://www.biorxiv.org/content/early/2026/03/31/v1.source.xml", "server": "bioRxiv"},
+    {"title": "The First 1000 Days", "authors": "Raviv, H.; Chen, B.", "date": "2026-04-27", "version": "2",
+     "jatsxml": "https://www.biorxiv.org/content/early/2026/04/27/v2.source.xml", "server": "bioRxiv"},
+]}
+
+
+def test_biorxiv_full_text_from_the_api(config, client, router):
+    router.add(BIORXIV_API, json_body=BIORXIV_VERSIONS)
+    router.add("https://www.biorxiv.org/content/early/2026/04/27/v2.source.xml",
+               headers={"content-type": "application/xml"}, content=b"<?xml version='1.0'?>" + JATS_ARTICLE)
+    rec = fetcher(config, client).get(parse(BIORXIV_DOI))
+    assert rec.source["source"] == "biorxiv"
+    assert (rec.paper.title, rec.paper.year, rec.paper.venue) == ("The First 1000 Days", 2026, "bioRxiv")
+    assert rec.key == "raviv2026-first-1000-days"
+
+
+def test_cloudflare_block_is_reported_and_not_repeated(config, client, router):
+    router.add(BIORXIV_API, json_body=BIORXIV_VERSIONS)
+    router.add("https://www.biorxiv.org/content/early/2026/04/27/v2.source.xml", status=429,
+               headers={"server": "cloudflare"}, content=b"error code: 1015")
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse(BIORXIV_DOI))
+    assert e.value.reason == "blocked by Cloudflare at www.biorxiv.org"
+    assert e.value.open_url == "https://www.biorxiv.org/content/early/2026/04/27/v2.source.xml"
+    biorxiv = [u for u in router.urls() if u.startswith("https://www.biorxiv.org/")]
+    assert len(biorxiv) == 1  # the PDF on the same host is left for the browser
+    assert ("skipped", "blocked by Cloudflare at www.biorxiv.org") in {(a.outcome, a.detail) for a in e.value.attempts}
+
+
+def test_osf_preprint_through_the_api(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "https://osf.io/xbyr3", "version": "acceptedVersion"},
+    ]))
+    router.add("https://api.osf.io/v2/guids/xbyr3/", status=302,
+               headers={"location": "https://api.osf.io/v2/preprints/xbyr3_v1/"})
+    router.add("https://api.osf.io/v2/preprints/xbyr3_v1/", json_body={"data": {
+        "type": "preprints", "attributes": {"title": "Moving beyond nouns", "date_published": "2021-11-23T07:10:51"},
+        "relationships": {"primary_file": {"links": {"related": {"href": "https://api.osf.io/v2/files/619c/"}}}},
+        "links": {"doi": "https://doi.org/10.1037/dev0001630"}}})
+    router.add("https://api.osf.io/v2/files/619c/", json_body={"data": {
+        "type": "files", "links": {"download": "https://osf.io/download/mqf5d/"}}})
+    router.add("https://osf.io/download/mqf5d/", headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert rec.source["url"] == "https://osf.io/download/mqf5d/"
+    assert rec.paper.osf == "xbyr3"
+    assert "https://osf.io/xbyr3" not in router.urls()
+
+
+def test_europe_pmc_pdf_is_left_for_the_browser(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(ids={"pmcid": "https://www.ncbi.nlm.nih.gov/pmc/articles/6176610"}))
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/PMC6176610/fullTextXML", status=500)
+    router.add("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi", headers={"content-type": "text/xml"},
+               content=b"<?xml version='1.0'?><pmc-articleset><article><front/></article></pmc-articleset>")
+    router.add("https://europepmc.org/articles/PMC6176610", status=403)
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert ("europepmc-pdf", "blocked") in {(a.source, a.outcome) for a in e.value.attempts}
+    assert e.value.reason == "europepmc.org refused plain HTTP (needs the browser)"
+    assert e.value.open_url == "https://europepmc.org/articles/PMC6176610?pdf=render"
+
+
+def test_issue_year_from_crossref(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(publication_year=2013, locations=[
+        {"is_oa": True, "pdf_url": "https://repository.example/x.pdf"}]))
+    router.add("https://repository.example/x.pdf", headers={"content-type": "application/pdf"}, content=PDF)
+    router.add("https://api.crossref.org/works/10.1038/nature14539", json_body={"message": {
+        "type": "journal-article", "volume": "85", "issue": "3", "page": "956-970",
+        "published-online": {"date-parts": [[2013, 12, 1]]}, "published-print": {"date-parts": [[2014, 5, 1]]}}})
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert rec.paper.year == 2014
+    assert (rec.paper.volume, rec.paper.issue, rec.paper.pages) == ("85", "3", "956-970")
+    assert rec.key == "lecun2014-deep-learning"

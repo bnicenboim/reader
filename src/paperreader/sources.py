@@ -9,7 +9,7 @@ from urllib.parse import quote
 from .config import Config
 from .html import PageInfo, parse_page
 from .http import PoliteClient
-from .identifiers import ACL_DOI_PREFIX, ARXIV_NEW_RE, ARXIV_OLD_RE, PMCID_RE, arxiv_base
+from .identifiers import ACL_DOI_PREFIX, ARXIV_NEW_RE, ARXIV_OLD_RE, PMCID_RE, arxiv_base, osf_from_url
 from .models import Candidate, Paper
 
 OPENALEX = "https://api.openalex.org/works"
@@ -19,6 +19,12 @@ S2 = "https://api.semanticscholar.org/graph/v1/paper"
 ARXIV_API = "https://export.arxiv.org/api/query"
 EUROPEPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+BIORXIV_API = "https://api.biorxiv.org"
+OSF_API = "https://api.osf.io/v2"
+
+# bioRxiv and medRxiv DOIs: 10.1101/2020.03.28.013508, 10.1101/123456 (older), 10.64898/... (since 2025).
+# Cold Spring Harbor's journals share 10.1101 but have letters in theirs (10.1101/gad.1234).
+BIORXIV_DOI_RE = re.compile(r"10\.(?:1101|64898)/(?:\d{4}\.\d{2}\.\d{2}\.)?\d{6,}")
 
 
 def arxiv_from_url(url: str | None) -> str | None:
@@ -75,7 +81,75 @@ def repository_candidates(paper: Paper) -> list[Candidate]:
         # Europe PMC's API only serves the open-access subset. NCBI's efetch also serves author manuscripts
         # (NIH public access), which the PMC website hides behind a bot check.
         out.append(Candidate(f"{EUTILS}/efetch.fcgi?db=pmc&id={paper.pmcid[3:]}", "jats", "ncbi-eutils"))
+        # For publishers that refuse XML downloads (PNAS) both give the front matter only. Europe PMC's rendered
+        # PDF refuses scripts (403), which puts it in the queue for the browser.
+        out.append(Candidate(f"https://europepmc.org/articles/{paper.pmcid}?pdf=render", "pdf", "europepmc-pdf"))
     return out
+
+
+# --- preprint servers (one API call each, only for their own ids) ---------------------------------
+
+
+def biorxiv(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]:
+    """bioRxiv and medRxiv: the latest version's JATS XML and PDF, from the API.
+
+    The full text is on www.biorxiv.org, which is quick to answer scripts with Cloudflare's error 1015.
+    """
+    if not (paper.doi and BIORXIV_DOI_RE.fullmatch(paper.doi)):
+        return []
+    for server in ("biorxiv", "medrxiv"):
+        data = client.get_json(f"{BIORXIV_API}/details/{server}/{paper.doi}")
+        if versions := (data or {}).get("collection") or []:
+            break
+    else:
+        return []
+    latest = versions[-1]
+    date = latest.get("date") or ""
+    paper.update(
+        title=latest.get("title"),
+        authors=[a.strip() for a in (latest.get("authors") or "").split(";") if a.strip()],
+        year=int(date[:4]) if date[:4].isdigit() else None,
+        venue=latest.get("server") or server,
+        pub_type="posted-content",
+    )
+    version = f"v{latest['version']}" if latest.get("version") else ""
+    out = []
+    if latest.get("jatsxml"):
+        out.append(Candidate(latest["jatsxml"], "jats", server, version="submittedVersion"))
+    out.append(Candidate(f"https://www.{server}.org/content/{paper.doi}{version}.full.pdf", "pdf", server,
+                         version="submittedVersion"))
+    return out
+
+
+def osf(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]:
+    """OSF preprints (PsyArXiv, SocArXiv, ...): the preprint's primary file.
+
+    Their pages are JavaScript applications without a PDF link; the API gives the download URL.
+    """
+    if not paper.osf:
+        return []
+    data = client.get_json(f"{OSF_API}/guids/{paper.osf}/")  # redirects to the preprint, file or project
+    d = (data or {}).get("data") or {}
+    if d.get("type") == "files":
+        url = (d.get("links") or {}).get("download")
+        return [Candidate(url, "pdf", "osf")] if url else []
+    if d.get("type") != "preprints":
+        return []
+    a, links = d.get("attributes") or {}, d.get("links") or {}
+    published = a.get("date_published") or ""
+    paper.update(
+        title=a.get("title"),
+        year=int(published[:4]) if published[:4].isdigit() else None,
+        # The journal article's DOI when there is one, else the preprint's.
+        doi=_strip_url(links.get("doi") or links.get("preprint_doi"), "doi.org/"),
+    )
+    href = ((((d.get("relationships") or {}).get("primary_file") or {}).get("links") or {}).get("related") or {}).get(
+        "href")
+    if not href:
+        return []
+    f = (client.get_json(href) or {}).get("data") or {}
+    url = (f.get("links") or {}).get("download")
+    return [Candidate(url, "pdf", "osf")] if url else []
 
 
 # --- OpenAlex ---------------------------------------------------------------------------------
@@ -126,6 +200,9 @@ def openalex(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]
         if pmc := pmc_from_url(landing) or pmc_from_url(pdf):
             paper.update(pmcid=pmc)
             continue  # PMC pages sit behind a bot check; covered by repository_candidates
+        if osf_id := osf_from_url(landing) or osf_from_url(pdf):
+            paper.update(osf=osf_id)
+            continue  # JavaScript pages without a PDF link; the OSF API gives the file
         if pdf:
             pdfs.append(Candidate(pdf, "pdf", "openalex", version=loc.get("version")))
         elif landing and "pubmed.ncbi.nlm.nih.gov" not in landing:
@@ -216,6 +293,9 @@ def unpaywall(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate
         if pmc := pmc_from_url(landing) or pmc_from_url(pdf):
             paper.update(pmcid=pmc)
             continue  # PMC pages sit behind a bot check; covered by repository_candidates
+        if osf_id := osf_from_url(landing) or osf_from_url(pdf):
+            paper.update(osf=osf_id)
+            continue
         if pdf:
             pdfs.append(Candidate(pdf, "pdf", "unpaywall", version=loc.get("version")))
         elif landing:
@@ -253,8 +333,54 @@ def semantic_scholar(client: PoliteClient, cfg: Config, paper: Paper) -> list[Ca
         pmcid=f"PMC{ext['PubMedCentral']}" if ext.get("PubMedCentral") else None,
     )
     url = (data.get("openAccessPdf") or {}).get("url")
+    if osf_id := osf_from_url(url):
+        paper.update(osf=osf_id)
+        return []
+    if pmc := pmc_from_url(url):
+        paper.update(pmcid=pmc)
+        return []  # PMC pages sit behind a bot check; covered by repository_candidates
     if url and not arxiv_from_url(url):
         return [Candidate(url, "pdf", "semantic-scholar")]
+    return []
+
+
+# --- Crossref ---------------------------------------------------------------------------------
+
+
+def _date_year(d: dict | None) -> int | None:
+    parts = ((d or {}).get("date-parts") or [[None]])[0]
+    return parts[0] if parts and isinstance(parts[0], int) else None
+
+
+def crossref(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]:
+    """Publication details for citations: type, volume, issue, pages, publisher, and the issue year.
+
+    The issue year replaces the year from other sources, which is often the year the article
+    appeared online (Child Development 85(3), 2014, was online in 2013). Bibliographies cite the issue.
+    """
+    if not paper.doi:
+        return []
+    params = {"mailto": cfg.email} if cfg.email else None
+    data = client.get_json(f"{CROSSREF}/{quote(paper.doi, safe='/')}", params)
+    m = (data or {}).get("message") or {}
+    if not m:
+        return []
+    authors = [" ".join(filter(None, (a.get("given"), a.get("family")))) for a in m.get("author") or []]
+    paper.update(
+        title=" ".join(((m.get("title") or [""])[0] or "").split()),
+        authors=[a for a in authors if a],
+        venue=(m.get("container-title") or [None])[0],
+        pub_type=m.get("type"),
+        volume=m.get("volume"),
+        issue=m.get("issue"),
+        pages=m.get("page"),
+        publisher=m.get("publisher"),
+    )
+    if m.get("type") != "posted-content":  # a preprint's "issue" year means nothing
+        issue = (m.get("journal-issue") or {}).get("published-print")
+        year = _date_year(m.get("published-print")) or _date_year(issue) or _date_year(m.get("issued"))
+        if year:
+            paper.year = year
     return []
 
 

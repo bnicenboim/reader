@@ -130,8 +130,16 @@ CHALLENGE_MARKERS = (
 )
 
 
+def cloudflare_error(html: str) -> str | None:
+    """The code of a Cloudflare error page (1015: rate-limit ban, 1020: firewall rule), if this is one."""
+    m = re.search(r'class="cf-error-code">\s*(\d{4})|error code: (\d{4})', html[:50_000], re.IGNORECASE)
+    return (m.group(1) or m.group(2)) if m else None
+
+
 def looks_like_challenge(html: str, title: str | None = None) -> bool:
     """Heuristic: is this an anti-bot interstitial rather than real content?"""
+    if cloudflare_error(html):
+        return False  # a block, not a check: nothing for a person to complete
     t = (title or "").strip().lower()
     if any(t.startswith(c) for c in CHALLENGE_TITLES):
         return True

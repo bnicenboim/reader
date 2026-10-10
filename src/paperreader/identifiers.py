@@ -6,13 +6,16 @@ import re
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote, urlsplit
 
-KINDS = ("doi", "arxiv", "pmid", "pmcid", "acl", "openreview", "url")
+KINDS = ("doi", "arxiv", "pmid", "pmcid", "acl", "openreview", "osf", "url")
 
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"<>]+")
 ARXIV_NEW_RE = re.compile(r"\d{4}\.\d{4,5}(?:v\d+)?")
 ARXIV_OLD_RE = re.compile(r"[a-z][a-z\-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?")
 ACL_RE = re.compile(r"\d{4}\.[a-z0-9][a-z0-9\-]*\.\d+|[A-Z]\d{2}-\d{4}")
 PMCID_RE = re.compile(r"PMC\d+", re.IGNORECASE)
+OSF_ID_RE = re.compile(r"[a-z0-9]{5}(?:_v\d+)?")
+# OSF preprint servers with their own domain; their links look like psyarxiv.com/<id>/download.
+OSF_HOSTS = ("osf.io", "psyarxiv.com", "socarxiv.org", "edarxiv.org", "mindrxiv.org", "metaarxiv.org")
 
 ARXIV_DOI_PREFIX = "10.48550/arxiv."
 ACL_DOI_PREFIX = "10.18653/v1/"
@@ -45,6 +48,24 @@ def normalize_doi(doi: str) -> str:
 def arxiv_base(arxiv_id: str) -> str:
     """Strip the version suffix: 1706.03762v5 -> 1706.03762."""
     return re.sub(r"v\d+$", "", arxiv_id)
+
+
+def osf_base(osf_id: str) -> str:
+    """Strip the version suffix: xbyr3_v2 -> xbyr3."""
+    return re.sub(r"_v\d+$", "", osf_id.lower())
+
+
+def osf_from_url(url: str | None) -> str | None:
+    """The OSF id in a preprint link: osf.io/xbyr3, osf.io/preprints/psyarxiv/xbyr3_v1, psyarxiv.com/qzbgx/download.
+
+    Not osf.io/download/<id>, which is already a file.
+    """
+    parts = urlsplit(url or "")
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    if host not in OSF_HOSTS:
+        return None
+    m = re.fullmatch(r"/(?:preprints/[a-z]+/)?([^/]+)(?:/download)?/?", parts.path.lower())
+    return osf_base(m.group(1)) if m and OSF_ID_RE.fullmatch(m.group(1)) else None
 
 
 def _from_doi(doi: str, url: str | None = None) -> Identifier:
@@ -86,6 +107,9 @@ def _from_url(url: str) -> Identifier:
     if host == "openreview.net" and "id" in query:
         return Identifier("openreview", query["id"][0], url)
 
+    if osf := osf_from_url(url):
+        return Identifier("osf", osf, url)
+
     # Many publisher URLs embed the DOI: dl.acm.org/doi/10.1145/..., link.springer.com/article/10.1007/...
     m = DOI_RE.search(path) or DOI_RE.search(unquote(parts.query))
     if m:
@@ -97,7 +121,7 @@ def _from_url(url: str) -> Identifier:
 
 
 def parse(text: str) -> Identifier:
-    """Parse a DOI, arXiv id, PMID, PMCID, ACL Anthology id, OpenReview id or URL."""
+    """Parse a DOI, arXiv id, PMID, PMCID, ACL Anthology id, OpenReview id, OSF id or URL."""
     s = text.strip().strip("<>").strip()
     if not s:
         raise UnrecognizedIdentifier("empty identifier")
@@ -121,6 +145,10 @@ def parse(text: str) -> Identifier:
             return Identifier("acl", rest)
         if p == "openreview":
             return Identifier("openreview", rest)
+        if p == "osf" and OSF_ID_RE.fullmatch(rest.lower()):
+            return Identifier("osf", osf_base(rest))
+        if p == "url" and re.match(r"https?://", rest, re.IGNORECASE):  # as Identifier.__str__ writes it
+            return _from_url(rest)
 
     if re.fullmatch(r"10\.\d{4,9}/\S+", s):
         return _from_doi(s)

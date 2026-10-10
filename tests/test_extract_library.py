@@ -1,3 +1,4 @@
+import pytest
 from conftest import make_pdf
 
 from paperreader.browser import load_session_cookies, save_session_cookies
@@ -150,3 +151,125 @@ def test_download_history_is_forgotten(tmp_path):
     assert db.execute("SELECT COUNT(*) FROM downloads").fetchone() == (0,)
     assert db.execute("SELECT COUNT(*) FROM urls").fetchone() == (1,)  # browsing history is kept
     _forget_downloads(tmp_path / "missing")  # no profile yet: nothing to do
+
+
+def test_pdf_text_cleaning():
+    from paperreader.extract import _clean, _is_hal_cover
+
+    raw = ("it showed effects [F(2, 42) = 17.37, p = 3.2e\r\n−6\r\n, η2 = .453] and more\r\n"
+           "Downloaded from http://royalsocietypublishing.org/rstb/article-pdf/doi/10.1098/x.pdf\r\nby guest\r\n"
+           "a rate of 2.5 × 10\r\n−3\r\nper second\r\n")
+    assert _clean(raw) == "it showed effects [F(2, 42) = 17.37, p = 3.2e−6, η2 = .453] and more\n" \
+                          "a rate of 2.5 × 10^−3\nper second"
+    assert _is_hal_cover("HAL Id: hal-03080098\nhttps://hal.science/hal-03080098v1\nSubmitted on 17 Dec 2020")
+    assert not _is_hal_cover("Does infant-directed speech help phonetic learning?")
+
+
+PDF_TEXT = """# A paper
+
+Authors: A. Author
+
+---
+
+<!-- page 1 -->
+
+1 Tokyo Institute of Technology
+Abstract
+We study things.
+1. Introduction
+3 participants were excluded because of noise.
+2. Method
+2.1. Participants
+Twelve children.
+<!-- page 2 -->
+
+3. Results
+It worked.
+References
+Smith, J. (2020). A study. Journal 1, 1-2.
+<!-- page 3 -->
+
+Appendix A. Extra results
+More numbers.
+"""
+
+
+def test_sections_of_pdf_text():
+    from paperreader import sections
+
+    titles = [(h.level, h.title, h.page) for h in sections.headings(PDF_TEXT)]
+    assert titles == [(1, "Abstract", 1), (1, "1. Introduction", 1), (1, "2. Method", 1), (2, "2.1. Participants", 1),
+                      (1, "3. Results", 2), (1, "References", 2), (1, "Appendix A. Extra results", 3)]
+    text, missing = sections.extract(PDF_TEXT, ["method", "Discussion"])
+    assert text == "<!-- page 1 -->\n\n2. Method\n2.1. Participants\nTwelve children.\n<!-- page 2 -->"
+    assert missing == ["Discussion"]
+    short = sections.without_references(PDF_TEXT)
+    assert "Smith, J." not in short and "(references omitted)" in short
+    assert "<!-- page 3 -->\n\nAppendix A. Extra results" in short
+
+
+def test_sections_of_jats_text():
+    from paperreader import sections
+
+    text = "# T\n\n---\n\n## Abstract\n\nShort.\n\n## Method\n\n### Participants\n\nKids.\n\n## References\n\n1. X."
+    assert [(h.level, h.name) for h in sections.headings(text)] == [
+        (1, "abstract"), (1, "method"), (2, "participants"), (1, "references")]
+    assert sections.extract(text, ["Participants"])[0] == "### Participants\n\nKids."
+    short = sections.without_references(text)
+    assert short.endswith("## Method\n\n### Participants\n\nKids.\n\n(references omitted)\n")
+
+
+def test_library_keys(tmp_path):
+    lib = Library(tmp_path)
+    p = Paper(title="Skype me", authors=["Sarah Roseberry"], year=2013, doi="10.1111/cdev.12166")
+    rec = lib.save(p, b"%PDF-1.4 fake", "pdf", "body", {"source": "test"})
+    assert rec.key == "roseberry2013-skype-me"
+    rec = lib.rename(rec, "roseberry2014")
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["roseberry2014.json", "roseberry2014.md", "roseberry2014.pdf"]
+    assert lib.by_key("roseberry2014").paper.doi == "10.1111/cdev.12166"
+    other = Paper(title="Other", authors=["B"], year=2020, doi="10.1/other")
+    with pytest.raises(ValueError, match="taken"):
+        lib.save(other, b"%PDF-1.4", "pdf", "x", {}, key="roseberry2014")
+    with pytest.raises(ValueError, match="not a usable key"):
+        lib.rename(rec, "../escape")
+    # Saving the same paper under a new key moves it.
+    rec = lib.save(p, b"%PDF-1.4 fake", "pdf", "body", {"source": "test"}, key="roseberry2014b")
+    assert lib.by_key("roseberry2014") is None and rec.files["pdf"].exists()
+
+
+def test_pending_list(tmp_path):
+    from paperreader.pending import Pending
+
+    pending = Pending(tmp_path / "pending.json")
+    p = Paper(title="Paywalled", doi="10.1/x")
+    pending.add(p, "doi:10.1/x", "no open copy", "https://doi.org/10.1/x", [], key="smith2020")
+    pending.add(p, "doi:10.1/x", "sign-in needed", None, [])  # replaces the earlier entry
+    assert [(e["id"], e["reason"]) for e in pending.all()] == [("doi:10.1/x", "sign-in needed")]
+    pending.remove(Paper(doi="10.1/x", pmid="1"))
+    assert pending.all() == []
+
+
+def test_bibtex_entries():
+    from paperreader.bibtex import bibtex
+
+    p = Paper(title="Skype Me! Socially Contingent Interactions Help Toddlers Learn Language",
+              authors=["Sarah Roseberry", "Kathy Hirsh-Pasek"], year=2014, venue="Child Development",
+              doi="10.1111/cdev.12166", pub_type="journal-article", volume="85", issue="3", pages="956-970")
+    assert bibtex(p) == """@article{roseberry2014skype,
+  author = {Sarah Roseberry and Kathy Hirsh-Pasek},
+  title = {Skype Me! Socially Contingent Interactions Help Toddlers Learn Language},
+  journal = {Child Development},
+  year = {2014},
+  volume = {85},
+  number = {3},
+  pages = {956--970},
+  doi = {10.1111/cdev.12166}
+}"""
+    preprint = Paper(title="Attention & you", authors=["Vaswani, A."], year=2017, arxiv="1706.03762", venue="arXiv")
+    assert bibtex(preprint, key="vaswani2017") == """@misc{vaswani2017,
+  author = {Vaswani, A.},
+  title = {Attention \\& you},
+  year = {2017},
+  eprint = {1706.03762},
+  archiveprefix = {arXiv}
+}"""

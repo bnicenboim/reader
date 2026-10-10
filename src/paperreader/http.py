@@ -29,6 +29,15 @@ class RateLimited(Exception):
         super().__init__(f"{host} is rate limiting us{wait}")
 
 
+class CloudflareBlocked(RateLimited):
+    """Cloudflare's error 1015: the site's rate-limit rule banned this IP for a while. Waiting does not help."""
+
+    def __init__(self, host: str):
+        self.host = host
+        self.retry_after = None
+        Exception.__init__(self, f"blocked by Cloudflare at {host} (error 1015); waiting will not help")
+
+
 class TooLarge(Exception):
     pass
 
@@ -150,6 +159,9 @@ class PoliteClient:
             host = urlsplit(url).hostname or ""
             self.limiter.acquire(host)
             with self._client.stream(method, url, headers=headers) as r:
+                if r.status_code == 429 and r.headers.get("server", "").lower() == "cloudflare":
+                    if b"1015" in r.read()[:20_000]:
+                        raise CloudflareBlocked(host)
                 wait = retry_after_seconds(r.headers.get("retry-after"))
                 # 429 always means "slow down"; 503 only when the server says when to come back
                 # (otherwise it is often a bot wall, and hammering it would not help).

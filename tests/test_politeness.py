@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from paperreader.config import Config, Limit
-from paperreader.http import Cache, PoliteClient, RateLimited, retry_after_seconds
+from paperreader.http import Cache, CloudflareBlocked, PoliteClient, RateLimited, retry_after_seconds
 from paperreader.ratelimit import QuotaExceeded, RateLimiter
 
 
@@ -77,6 +77,15 @@ def test_long_retry_after_gives_up(client, router):
         client.get("https://api.example.org/x")
 
 
+def test_cloudflare_1015_is_a_block_not_retried(client, router):
+    router.add("https://www.biorxiv.org/x.pdf", status=429, headers={"server": "cloudflare"},
+               content=b"error code: 1015")
+    with pytest.raises(CloudflareBlocked) as e:
+        client.get("https://www.biorxiv.org/x.pdf")
+    assert len(router.requests) == 1  # waiting would not help, so no retries
+    assert "blocked by Cloudflare" in str(e.value)
+
+
 def test_each_redirect_hop_is_rate_limited(client, router, clock):
     router.add("https://doi.org/10.1/x", status=302, headers={"location": "https://publisher.example/a"})
     router.add("https://publisher.example/a", status=302, headers={"location": "/b"})
@@ -117,3 +126,10 @@ def test_api_keys_from_environment(tmp_path, monkeypatch):
     path = tmp_path / "config.toml"
     path.write_text('[keys]\nopenalex = "from-file"\n')
     assert load(path).openalex_key == "from-file"
+
+
+def test_email_from_environment(tmp_path, monkeypatch):
+    from paperreader.config import load
+
+    monkeypatch.setenv("PAPERREADER_EMAIL", "agent@example.edu")
+    assert load(tmp_path / "missing.toml").email == "agent@example.edu"

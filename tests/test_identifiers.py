@@ -32,6 +32,13 @@ from paperreader.identifiers import Identifier, UnrecognizedIdentifier, parse
          "10.1371/journal.pone.0000308"),
         ("https://proceedings.mlr.press/v139/radford21a.html", "url",
          "https://proceedings.mlr.press/v139/radford21a.html"),
+        ("url:https://proceedings.mlr.press/v139/radford21a.html", "url",
+         "https://proceedings.mlr.press/v139/radford21a.html"),
+        ("osf:xbyr3", "osf", "xbyr3"),
+        ("https://osf.io/xbyr3", "osf", "xbyr3"),
+        ("https://osf.io/preprints/psyarxiv/xbyr3_v1/", "osf", "xbyr3"),
+        ("https://psyarxiv.com/qzbgx/download", "osf", "qzbgx"),
+        ("https://osf.io/download/mqf5d/", "url", "https://osf.io/download/mqf5d/"),
     ],
 )
 def test_parse(text, kind, value):

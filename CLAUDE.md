@@ -4,7 +4,7 @@
 
 `paper` (package `paperreader`, in `src/paperreader/`) is a command-line tool that
 downloads a research paper from a DOI, arXiv id, PMID/PMCID, ACL Anthology id,
-OpenReview id, URL or exact title. It stores the paper in the library
+OpenReview id, OSF id, URL, exact title or library key. It stores the paper in the library
 (`~/papers` by default) as three files: the PDF (or JATS XML), a Markdown text
 version with `<!-- page N -->` markers, and a JSON metadata sidecar.
 
@@ -23,7 +23,8 @@ uvx ruff check src tests     # lint (line length 120)
 uv run paper --help
 ```
 
-Tests marked `network` hit real servers and are deselected by default.
+Tests marked `network` hit real servers and are deselected by default; `uv run pytest -m network`
+runs the real papers from `docs/literature-review-use-case.md` (no browser, your config, a temporary library).
 
 ## Layout
 
@@ -33,14 +34,17 @@ Tests marked `network` hit real servers and are deselected by default.
 | `config.py` | TOML config, per-host `Limit`s, config template |
 | `ratelimit.py` | per-host spacing plus hourly/daily caps, stored in SQLite and shared across processes |
 | `http.py` | `PoliteClient`: rate-limits each redirect hop, honours `Retry-After`, caches API answers |
-| `sources.py` | OpenAlex, Unpaywall, Semantic Scholar, arXiv, Europe PMC, NCBI E-utilities, ACL, OpenReview, Crossref search |
+| `sources.py` | OpenAlex, Unpaywall, Semantic Scholar, arXiv, Europe PMC, NCBI E-utilities, ACL, OpenReview, bioRxiv/medRxiv, OSF, Crossref (search and publication details) |
 | `publishers.py` | PDF URL templates by DOI prefix, Elsevier API, institutional proxy URL rewriting |
-| `html.py` | landing-page metadata (`citation_pdf_url`, meta refresh) and bot-wall detection |
+| `html.py` | landing-page metadata (`citation_pdf_url`, meta refresh), bot-wall, sign-in and Cloudflare-error detection |
 | `browser.py` | Playwright with a persistent profile, `login`, human-check handling |
-| `fetch.py` | the pipeline: candidate order, attempts, browser retries, hints on failure |
-| `extract.py` | PDF to text (pypdfium2) and JATS to Markdown |
-| `library.py` | storage, readable keys (`vaswani2017-attention-all-you-need`), lookup by any id |
-| `cli.py` | `get`, `read`, `resolve`, `search`, `list`, `login`, `usage`, `install-browser`, `config` |
+| `fetch.py` | the pipeline: candidate order, attempts, browser retries, failure reason and hints |
+| `extract.py` | PDF to text (pypdfium2; drops HAL cover pages and watermarks, joins exponents) and JATS to Markdown |
+| `sections.py` | headings of the text (Markdown, or guessed for PDFs), one section, text without references |
+| `library.py` | storage, readable or user-chosen keys (`vaswani2017-attention-all-you-need`), lookup by any id or key |
+| `pending.py` | papers that need a person, kept in the library as `pending.json` |
+| `bibtex.py` | BibTeX entries from the stored metadata |
+| `cli.py` | `get`, `read`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `login`, `usage`, `install-browser`, `config` |
 
 ## Fetch order
 
@@ -48,7 +52,8 @@ Cheapest and most polite first; stop at the first route that works:
 
 1. The library, matched on any id (a paper fetched by arXiv id is found again by DOI).
 2. Open repositories: arXiv, ACL Anthology, OpenReview, PubMed Central full text via Europe PMC
-   and NCBI E-utilities.
+   and NCBI E-utilities. Preprint servers through their APIs: bioRxiv/medRxiv (by DOI) and OSF
+   (ids found in OpenAlex, Unpaywall or Semantic Scholar locations, or given directly).
 3. Open-access copies listed by OpenAlex, Unpaywall and Semantic Scholar.
    Versions of record come before preprints.
 4. The publisher over plain HTTP (works on a campus network or VPN).
@@ -84,7 +89,7 @@ Verified on real papers: arXiv, ACL Anthology, PMLR, HAL (the green open-access 
 paywalled Nature paper) and PubMed Central. The browser's PDF download path works.
 The institutional proxy works: on 10 October 2026 an IEEE paper came through Tilburg's EZproxy
 after `paper login`, with the saved session and a visible window.
-There are 68 unit tests, all passing.
+There are 90 unit tests, all passing, and 21 network tests from the literature-review notes.
 
 Not verified:
 - The proxy route for publishers other than IEEE (AIP reached the article page through it).
@@ -139,10 +144,25 @@ Not verified:
 - IEEE Xplore answers headless Chromium with HTTP 418, which counts as a bot check (visible retry). Its
   pages have no `citation_pdf_url`; the PDF is `/stampPDF/getPDF.jsp?tp=&arnumber=N`, with N from the
   `/document/N` URL.
+- www.biorxiv.org answers scripts with HTTP 429 and Cloudflare's error 1015 (a ban, not a slow-down):
+  `http.CloudflareBlocked`, not retried; the run skips plain HTTP to that host and queues its URLs for the
+  browser. api.biorxiv.org answers fine and lists every version with a `jatsxml` URL. bioRxiv DOIs are
+  10.1101/... and, since 2025, 10.64898/...
+- OSF preprint pages (osf.io, psyarxiv.com) are JavaScript without a PDF link. `api.osf.io/v2/guids/<id>/`
+  redirects to the preprint; its `primary_file` gives the file, whose `links.download` is the PDF.
+- OpenAlex's `publication_year` is often the online year; bibliographies cite the issue year. Crossref's
+  `published-print` gives it, so the Crossref lookup after a download replaces the year (not for
+  `posted-content`). It also gives volume, issue and pages for `paper bib`.
+- Europe PMC's rendered PDF (`europepmc.org/articles/PMC…?pdf=render`) refuses scripts with 403; it is a
+  candidate anyway, so it lands in the browser queue for papers whose publisher refuses XML (PNAS).
+  Headless, it shows Cloudflare's "Just a moment..."; in the visible window that follows, the check
+  cleared by itself and the PDF arrived (from `europepmc.org/api/getPdf`).
+- pypdfium2 puts superscripts on their own line ("p = 3.2e" / "−6"); `extract._clean` joins them.
 
 ## Next steps
 
 - An MCP server so other agent apps can use the tool.
-- `docs/literature-review-use-case.md`: missing routes (bioRxiv API, OSF preprints) and features
-  an agent doing a literature review needed, from use on 10 October 2026.
+- `docs/literature-review-use-case.md` lists what a literature-review agent needed (10 October 2026);
+  its items are implemented. Not verified: bioRxiv full text through the browser after a Cloudflare 1015
+  (from the user's network plain HTTP got through), and section guessing on more PDF layouts.
 - Fetching arXiv LaTeX source for maths-heavy papers.

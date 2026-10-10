@@ -10,13 +10,33 @@ def is_pdf(data: bytes) -> bool:
     return b"%PDF-" in data[:1024]
 
 
+# Publisher watermarks on every page, e.g. "Downloaded from http://royalsocietypublishing.org/... " / "by guest"
+# (Royal Society) or "Downloaded from https://academic.oup.com/... by guest on 4 March 2024" (OUP).
+WATERMARK_RE = re.compile(r"^Downloaded from https?://\S+.*\n(?:(?:by guest|on \d).*\n)*", re.MULTILINE)
+# pdfium puts a superscript on a line of its own: "p = 3.2e" / "−6" / ", d = 0.4", or "× 10" / "−6".
+EXPONENT_RE = re.compile(r"(\d(?:e|\s?[×x·]\s?10))\n([−–-]?\d{1,3})(?:\n(?=[,;:.)\]]))?")
+HAL_COVER_MARKS = ("HAL is a multi-disciplinary open access archive", "L’archive ouverte pluridisciplinaire HAL")
+
+
+def _join_exponent(m: re.Match) -> str:
+    base, exponent = m.group(1), m.group(2)
+    return f"{base}{exponent}" if base.endswith("e") else f"{base}^{exponent}"
+
+
 def _clean(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # pdfium marks hyphens it knows to be soft (line-break hyphenation) with U+FFFE.
-    text = re.sub("￾\n?", "", text)
+    text = re.sub("\ufffe\n?", "", text)
     text = text.replace("\x00", "")
     text = re.sub(r"[ \t]+\n", "\n", text)
+    text = WATERMARK_RE.sub("", text + "\n")
+    text = EXPONENT_RE.sub(_join_exponent, text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _is_hal_cover(text: str) -> bool:
+    """HAL puts a cover page with its bilingual disclaimer in front of every deposited PDF."""
+    return text.startswith("HAL Id:") or any(m in text for m in HAL_COVER_MARKS)
 
 
 def pdf_info(data: bytes) -> dict:
@@ -40,7 +60,10 @@ def pdf_to_text(data: bytes) -> str:
         for i in range(len(doc)):
             page = doc[i]
             textpage = page.get_textpage()
-            parts.append(f"<!-- page {i + 1} -->\n\n{_clean(textpage.get_text_range())}")
+            text = _clean(textpage.get_text_range())
+            if i == 0 and len(doc) > 1 and _is_hal_cover(text):
+                text = "(HAL cover page omitted)"
+            parts.append(f"<!-- page {i + 1} -->\n\n{text}")
             textpage.close()
             page.close()
     finally:

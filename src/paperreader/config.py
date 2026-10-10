@@ -45,6 +45,8 @@ BUILTIN_LIMITS: dict[str, Limit] = {
     "eutils.ncbi.nlm.nih.gov": Limit(0.4, per_day=5000),  # E-utilities: 3 requests / s without a key
     "api.elsevier.com": Limit(1.0, per_hour=100, per_day=500),
     "doi.org": Limit(0.5, per_day=5000),
+    "api.biorxiv.org": Limit(1.0, per_day=5000),
+    "api.osf.io": Limit(1.0, per_day=5000),
     "aclanthology.org": Limit(2.0, per_hour=200, per_day=1000),
 }
 
@@ -102,8 +104,9 @@ def _limit(d: dict, base: Limit) -> Limit:
     )
 
 
-# API keys can also come from the environment, e.g. secrets of a cloud environment.
-KEY_ENV_VARS = {
+# The email and API keys can also come from the environment, e.g. secrets of a cloud environment.
+ENV_VARS = {
+    "email": "PAPERREADER_EMAIL",
     "openalex_key": "OPENALEX_API_KEY",
     "semantic_scholar_key": "SEMANTIC_SCHOLAR_API_KEY",
     "elsevier_key": "ELSEVIER_API_KEY",
@@ -116,7 +119,7 @@ def load(path: Path | None = None) -> Config:
     cfg = Config(path=path)
     if path.exists():
         _load_file(cfg, path)
-    for attr, var in KEY_ENV_VARS.items():
+    for attr, var in ENV_VARS.items():
         if not getattr(cfg, attr) and os.environ.get(var):
             setattr(cfg, attr, os.environ[var])
     return cfg
@@ -163,6 +166,7 @@ TEMPLATE = """\
 
 # Used for the Unpaywall API (required there) and to identify yourself to
 # Crossref/OpenAlex, which give identified clients better service.
+# Can instead be set in the environment: PAPERREADER_EMAIL.
 email = ""
 
 # Where downloaded papers (PDF + extracted text + metadata) are stored.

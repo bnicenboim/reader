@@ -11,6 +11,36 @@ E-utilities route was added, 16 did. The rest are below.
 
 Items are ordered by how much they would have helped.
 
+## Status
+
+All twelve items were implemented on 10 October 2026. The test cases below are in
+`tests/test_network.py` (`uv run pytest -m network`); all 21 pass from a desktop on the
+Tilburg University network, without the browser.
+
+1. bioRxiv/medRxiv: `sources.biorxiv` uses the API for the latest version's JATS XML and
+   PDF. Cloudflare's 1015 is reported as "blocked by Cloudflare at <host>", is not retried,
+   and leaves the host's URLs to the browser. From the desktop, plain HTTP got the XML.
+2. OSF: links from OpenAlex, Unpaywall and Semantic Scholar become an OSF id; the OSF API
+   gives the file. `osf:<id>` and OSF URLs are identifiers too.
+3. PMC without XML: Europe PMC's rendered PDF is a candidate; it refuses plain HTTP and
+   goes to the browser, where the PDF arrived after a Cloudflare check cleared by itself.
+   With the library proxy configured, the proxy is tried first and got Lytle 2018 from PNAS.
+4. `paper pending` lists every paper `get` could not fetch, with the reason and the page to
+   open; `--retry`, `--tsv`, `--json`, `--clear`.
+5. `paper add FILE [ID]`; without an id, the first DOI or arXiv id on the first pages.
+6. `PAPERREADER_EMAIL`.
+7. `paper get --key KEY`, keys per line in `--from`, and `--export DIR --name '{key}.txt'`.
+   Library keys work wherever an identifier does. The year now comes from Crossref's issue
+   date (roseberry2014).
+8. `paper get --from FILE` (`key<TAB>identifier` or `identifier` per line, `-` for stdin)
+   ends with one line per paper.
+9. `paper bib ID...`, with type, volume, issue and pages from Crossref.
+10. HAL cover pages are dropped (the page marker stays) and "Downloaded from ..." watermark
+    lines removed.
+11. `paper read --sections`, `--section NAME` (repeatable) and `--no-refs`. PDF headings are
+    guessed: numbered headings in sequence, Roman numerals, the usual section names.
+12. Exponents split onto their own line are joined: "p = 3.2e−6".
+
 ## Missing download routes
 
 1. **bioRxiv and medRxiv.** `www.biorxiv.org` answered with rate limiting
@@ -87,6 +117,74 @@ Items are ordered by how much they would have helped.
 12. **Superscripts in PDF text.** Exponents are split onto their own lines
     (`p = 3.2e` / `−6`). This is minor and only matters when numbers are
     quoted.
+
+## Running with a person at the browser
+
+Observed on 10 October 2026 in a local session with a display, `mode = "auto"`
+and the institutional proxy configured. An agent ran one `paper get --json ID`
+per paper over a list of 50 papers, in sequence.
+
+13. **Repeated human checks for one paper.** For Marler & Peters 1977
+    (`10.1126/science.198.4316.519`) the user saw many Cloudflare challenges
+    and none of them led to the paper. The log:
+
+    ```text
+    blocked  direct  publisher    https://www.science.org/doi/pdf/10.1126/science.198.4316.519  (HTTP 403)
+    blocked  direct  publisher    https://doi.org/10.1126/science.198.4316.519  (HTTP 403)
+    no-pdf   browser institution  <proxy>?url=https://www.science.org/doi/pdf/10.1126/science.198.4316.519  (page without a PDF link)
+    no-pdf   browser institution  <proxy>?url=https://doi.org/10.1126/science.198.4316.519  (page without a PDF link)
+    no-pdf   browser publisher    https://www.science.org/doi/pdf/10.1126/science.198.4316.519  (page without a PDF link)
+    complete the human check of doi.org in the browser window (waiting up to 120 s)
+    blocked  browser publisher    https://doi.org/10.1126/science.198.4316.519  (bot check)
+    ```
+
+    In `Fetcher._fetch`, the first challenge sets `self.visible = True` for the
+    rest of the run. From then on every browser candidate waits up to
+    `browser_challenge_wait` (120 s) for a check. Nothing records that a check
+    on a host was shown and not passed, so the next candidate on the same site
+    shows a new one. Not checked: whether Cloudflare keeps re-challenging
+    because it recognises the automated Chromium (which would explain why
+    none passed), and whether the three "page without a PDF link" pages were
+    challenges that `looks_like_challenge` did not recognise.
+
+    What would have helped:
+    - After one check that is not passed, mark the host as needing a person
+      and skip its remaining candidates. Keep the mark for a while in the
+      state database, so the next `paper get` does not ask again.
+    - A cap on the total time one paper may wait for a person.
+    - Closing the window should mean "skip this paper", not "wait out the
+      timeout".
+    - In a batch, ask at most once, or collect the papers that need a check
+      and list them at the end (see item 4).
+
+    Workaround used: `--headless`. Bot checks then fail at once, and the hint
+    says to rerun with `--visible`.
+
+14. **A PDF saved under the wrong paper.** The library entry for Versace et
+    al. 2018 (`10.1016/j.tics.2018.07.005`, saved at 12:06:36Z) contains the
+    PDF of Lisman & Grace 2005 (`10.1016/j.neuron.2005.05.002`). Its sidecar
+    gives the source as `publisher`, via the browser, with the URL
+    `https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf`. That is the
+    Lisman PDF, which a separate `paper get` process had downloaded through
+    the browser three minutes earlier (12:03:25Z, source `openalex`). The
+    Versace process was killed by the agent about a minute after the save.
+    The cause was not determined. Both processes used the same persistent
+    browser profile, and the download handler accepts the first download
+    event on the page. Because the wrong file is now in the library, later
+    `paper get 10.1016/j.tics.2018.07.005` calls return it without any
+    network request.
+
+    What would have helped:
+    - Before saving, check that the first page of the text contains the DOI
+      or most of the title words. If not, reject the file with "the download
+      does not match the requested paper" and try the next candidate.
+    - Refuse a download whose URL is already the source of another library
+      entry.
+    - A `paper verify` command that runs the same check over the library.
+
+    A check over the 15 papers downloaded in this run found only this one
+    mismatch. For PubMed Central texts the DOI is often missing from the body,
+    so the title words are the more useful test.
 
 ## Test cases
 

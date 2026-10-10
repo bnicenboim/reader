@@ -8,7 +8,7 @@ $ paper get 10.18653/v1/2020.acl-main.1 arXiv:1706.03762 pmid:17375194
 $ paper read 10.1038/nature14539 --pages 1-3
 ```
 
-You give it a DOI, arXiv id, PMID/PMCID, ACL Anthology id, OpenReview id or URL.
+You give it a DOI, arXiv id, PMID/PMCID, ACL Anthology id, OpenReview id, OSF id, URL or exact title.
 It finds a copy, downloads it into `~/papers`, and writes next to it a Markdown
 text version (with `<!-- page N -->` markers) and a JSON metadata sidecar.
 
@@ -20,7 +20,8 @@ It tries the cheapest and most polite route first and stops at the first that wo
    (a paper fetched by arXiv id is found again by DOI). No network needed.
 2. **Open repositories reachable from the ids**: arXiv, ACL Anthology, OpenReview,
    and PubMed Central full-text XML through the Europe PMC API and NCBI E-utilities
-   (which also serve author manuscripts).
+   (which also serve author manuscripts). Preprint servers through their APIs:
+   bioRxiv and medRxiv, and OSF (PsyArXiv, SocArXiv, ...), whose pages have no PDF link.
 3. **Open-access copies** listed by OpenAlex, Unpaywall and Semantic Scholar
    (institutional repositories, HAL, publisher OA versions...). Versions of
    record are preferred over preprints. Landing pages are followed through their
@@ -48,6 +49,7 @@ or, from a checkout, `uv sync --all-extras` and run `uv run paper ...`.
 Edit the config. The settings worth filling in:
 
 - `email`: Unpaywall requires it; Crossref and OpenAlex give identified clients better service.
+  It can also come from the `PAPERREADER_EMAIL` environment variable.
 - `keys.openalex`: [free](https://help.openalex.org/api/authentication/). Without one,
   OpenAlex requests share a small daily budget with everyone on your IP address,
   and title search (10x the cost of a lookup) runs out first. Without OpenAlex,
@@ -81,6 +83,9 @@ The tool deals with them like this:
 - The browser fallback is a real browser. In the default `mode = "auto"` it runs
   headless, and when a site shows a human check it opens a visible window and waits
   for you to complete the check. The cleared session is then reused.
+- Cloudflare's error 1015 (a rate-limit ban, often given to scripts on the first request)
+  is reported as "blocked by Cloudflare": waiting does not help, so it is not retried, and
+  the URL is left for the browser.
 - It does not solve CAPTCHAs automatically (yet), spoof browser fingerprints or use
   shadow libraries.
 
@@ -107,20 +112,50 @@ like this in your `CLAUDE.md` is enough:
 
 ```markdown
 To read a paper, run `paper get <DOI|arXiv id|URL|title>`; it prints the path of a
-Markdown text version, which you can read (use `paper read <id> --pages 3-5` for
-parts of long papers). `paper search <keywords>` finds DOIs. If `get` fails, report
-its hints to me instead of looking for other copies of the paper.
+Markdown text version, which you can read (use `paper read <id> --section Methods`
+or `--no-refs` for parts of long papers). `paper search <keywords>` finds DOIs.
+If `get` fails, report its reason to me instead of looking for other copies.
 ```
 
 `--json` on `get`, `resolve`, `search` and `list` gives machine-readable output,
 including every attempt and hint when a download fails.
 
+**Batches and your own keys.** A project that cites papers by its own keys can
+fetch them in one go and get the texts under those keys:
+
+```console
+$ cat keys.tsv
+roseberry2014	10.1111/cdev.12166
+zellers2022	arXiv:2201.02639
+$ paper get --from keys.tsv --export fulltext --name '{key}.txt'
+ok    roseberry2014  ncbi-eutils
+ok    zellers2022    arxiv, submittedVersion
+```
+
+The keys become the papers' keys in the library, so `paper read roseberry2014` and
+`paper bib roseberry2014` work too. `paper bib` prints BibTeX from the metadata
+(Crossref gives the volume, issue, pages, and the issue year that bibliographies cite).
+
+**Without a person at the browser** (a cloud container, `--no-browser`), human checks
+and sign-ins cannot be done. Every paper `get` could not fetch goes on a list,
+`paper pending`, with the reason and the page to open. At your own machine,
+`paper pending --retry` tries them again with a browser, and
+`paper add FILE [ID]` registers a PDF you downloaded yourself.
+
+**Reading parts of a paper.** `paper read ID --sections` lists the headings
+(Markdown headings for JATS sources, guessed for PDFs), `--section Results` prints
+one section (repeatable), and `--no-refs` leaves out the reference list. PDF text
+is cleaned of HAL cover pages and "Downloaded from ..." watermarks.
+
 ## Commands
 
 | command | |
 | --- | --- |
-| `paper get ID...` | download into the library (`--force` to refetch, `--no-browser`, `--visible`) |
-| `paper read ID` | print the text, fetching first if needed (`--pages 1-3,7`) |
+| `paper get ID...` | download into the library (`--from FILE`, `--key`, `--export DIR`, `--force`, `--no-browser`, `--visible`) |
+| `paper read ID` | print the text, fetching first if needed (`--pages 1-3,7`, `--sections`, `--section NAME`, `--no-refs`) |
+| `paper add FILE [ID]` | register a PDF you downloaded yourself, with its metadata |
+| `paper bib ID...` | BibTeX entries |
+| `paper pending` | papers that need a person (`--retry`, `--tsv`, `--json`, `--clear`) |
 | `paper resolve ID` | metadata and candidate URLs, no download |
 | `paper search WORDS` | find papers by title/keywords |
 | `paper list` | the library |
@@ -136,4 +171,5 @@ uv sync --all-extras
 uv run pytest
 ```
 
-Tests use a mocked transport and never touch the network.
+Tests use a mocked transport and never touch the network. `uv run pytest -m network`
+runs the real papers from `docs/literature-review-use-case.md` against real servers.

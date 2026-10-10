@@ -3,7 +3,8 @@
 Order of attempts:
   1. the local library (no network)
   2. a URL the user gave
-  3. open repositories reachable from the ids alone (arXiv, ACL Anthology, OpenReview, PMC)
+  3. open repositories reachable from the ids alone (arXiv, ACL Anthology, OpenReview, PMC),
+     and preprint servers through their APIs (bioRxiv, medRxiv, OSF)
   4. open-access locations from OpenAlex, Unpaywall and Semantic Scholar
   5. Elsevier's API (if you have a key) and the publisher's site over plain HTTP,
      which works when your network has IP-based access
@@ -24,8 +25,8 @@ from . import sources
 from .browser import CHALLENGE_HEADER, SIGN_IN, Browser, BrowserUnavailable, display_available
 from .config import Config
 from .extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
-from .html import looks_like_challenge, parse_page
-from .http import HTTPError, PoliteClient, RateLimited, Response, TooLarge
+from .html import cloudflare_error, looks_like_challenge, parse_page
+from .http import CloudflareBlocked, HTTPError, PoliteClient, RateLimited, Response, TooLarge
 from .identifiers import Identifier
 from .library import Library, Record
 from .models import Attempt, Candidate, Paper
@@ -39,16 +40,28 @@ SESSION_SOURCES = {"input", "publisher"}
 
 VERSION_RANK = {"publishedVersion": 0, "acceptedVersion": 1, None: 2, "submittedVersion": 3}
 
+# Metadata for ids that OpenAlex may not know.
+METADATA_LOOKUPS = {
+    "arxiv": sources.arxiv_metadata,
+    "pmid": sources.europepmc_metadata,
+    "pmcid": sources.europepmc_metadata,
+    "acl": sources.acl_metadata,
+    "openreview": sources.openreview_metadata,
+}
+
 
 def _version_rank(c: Candidate) -> int:
     return VERSION_RANK.get(c.version, 2)
 
 
 class FetchFailed(Exception):
-    def __init__(self, paper: Paper, attempts: list[Attempt], hints: list[str]):
+    def __init__(self, paper: Paper, attempts: list[Attempt], hints: list[str], reason: str = "",
+                 open_url: str | None = None):
         self.paper = paper
         self.attempts = attempts
         self.hints = hints
+        self.reason = reason  # why, in a few words
+        self.open_url = open_url  # where a person could get it by hand
         super().__init__(f"could not get the full text of {paper.title or paper.ids()}")
 
 
@@ -72,6 +85,8 @@ class _Run:
     seen: set[tuple[str, str]] = field(default_factory=set)  # (via, url)
     browser_queue: list[Candidate] = field(default_factory=list)
     exhausted: set[str] = field(default_factory=set)  # hosts out of budget
+    cloudflare_blocked: set[str] = field(default_factory=set)  # hosts that answered with Cloudflare's error 1015
+    looked_up: set[str] = field(default_factory=set)  # preprint server lookups done
 
 
 class Fetcher:
@@ -101,21 +116,42 @@ class Fetcher:
 
     # -- public ---------------------------------------------------------------------------
 
-    def get(self, ident: Identifier, force: bool = False) -> Record:
+    def get(self, ident: Identifier, force: bool = False, key: str | None = None) -> Record:
+        """The paper from the library, or fetched into it; stored under `key` if given."""
         paper = Paper.from_identifier(ident)
         sources.derive_ids(paper)
         if not force and (rec := self.library.find(paper)):
-            return rec
+            return self.library.rename(rec, key) if key else rec
         run = _Run(paper)
         try:
             found = self._search(run, ident, check_library=not force)
         except _AlreadyHave as e:
-            return e.record
+            return self.library.rename(e.record, key) if key else e.record
         if found is None:
-            raise FetchFailed(paper, run.attempts, self._hints(run))
+            raise FetchFailed(paper, run.attempts, self._hints(run), *self._reason(run))
         self._complete_metadata(run)
         self._arxiv_year(run, found)
-        return self._store(paper, found)
+        self._lookup(run, sources.crossref)  # after the arXiv year: a published article's issue year wins
+        return self._store(paper, found, key)
+
+    def add(self, ident: Identifier, content: bytes, origin: str, key: str | None = None) -> Record:
+        """Store a PDF (or JATS XML) the user downloaded by hand, with metadata as `get` collects it."""
+        paper = self.describe(ident)
+        fmt = "pdf" if is_pdf(content) else "xml"
+        return self._store(paper, Found(content, fmt, Candidate(origin, fmt, "user", via="by hand"), origin), key)
+
+    def describe(self, ident: Identifier) -> Paper:
+        """Metadata only, as `get` would collect it, without downloading the paper."""
+        paper = Paper.from_identifier(ident)
+        sources.derive_ids(paper)
+        run = _Run(paper)
+        if metadata := METADATA_LOOKUPS.get(ident.kind):
+            self._lookup(run, metadata)
+        self._preprint_servers(run)
+        self._lookup(run, sources.openalex)
+        self._complete_metadata(run)
+        self._lookup(run, sources.crossref)
+        return paper
 
     def resolve(self, ident: Identifier) -> tuple[Paper, list[Candidate]]:
         """Metadata and every candidate location, without downloading anything."""
@@ -144,14 +180,7 @@ class Fetcher:
         if ident.url and ident.kind in ("doi", "url"):
             yield Candidate(ident.url, "pdf", "input")
 
-        metadata = {
-            "arxiv": sources.arxiv_metadata,
-            "pmid": sources.europepmc_metadata,
-            "pmcid": sources.europepmc_metadata,
-            "acl": sources.acl_metadata,
-            "openreview": sources.openreview_metadata,
-        }.get(ident.kind)
-        if metadata:
+        if metadata := METADATA_LOOKUPS.get(ident.kind):
             self._lookup(run, metadata)
 
         def check():
@@ -159,14 +188,26 @@ class Fetcher:
             if check_library and (rec := self.library.find(paper)):
                 raise _AlreadyHave(rec)
 
+        yield from self._preprint_servers(run)
         # OpenAlex first: one cheap call gives metadata, other ids and open-access copies.
         for lookup in (sources.openalex, sources.unpaywall, sources.semantic_scholar):
             found = self._lookup(run, lookup)
             check()
             # Repository copies first in case the lookup discovered new ids; versions of record first.
-            yield from sorted(sources.repository_candidates(paper) + found, key=_version_rank)
+            found = sources.repository_candidates(paper) + self._preprint_servers(run) + found
+            yield from sorted(found, key=_version_rank)
         yield from elsevier_candidates(self.config, paper)
         yield from publisher_candidates(paper)
+
+    def _preprint_servers(self, run: _Run) -> list[Candidate]:
+        """bioRxiv/medRxiv and OSF through their APIs, once their ids are known (a lookup may find them)."""
+        p, out = run.paper, []
+        biorxiv = bool(p.doi and sources.BIORXIV_DOI_RE.fullmatch(p.doi))
+        for lookup, ready in ((sources.biorxiv, biorxiv), (sources.osf, bool(p.osf))):
+            if ready and lookup.__name__ not in run.looked_up:
+                run.looked_up.add(lookup.__name__)
+                out += self._lookup(run, lookup)
+        return out
 
     def _institutional(self, paper: Paper) -> list[Candidate]:
         if not (self.config.proxy and paper.doi):
@@ -224,11 +265,21 @@ class Fetcher:
         if host in run.exhausted:
             note("skipped", "host budget used up")
             return None
+        if host in run.cloudflare_blocked and cand.via == "direct":
+            note("skipped", f"blocked by Cloudflare at {host}")
+            self._queue_for_browser(run, cand)
+            return None
         try:
             r = self._fetch(cand)
         except QuotaExceeded as e:
             run.exhausted.add(e.host)
             note("skipped", str(e))
+            return None
+        except CloudflareBlocked as e:
+            # Plain HTTP will not get through for a while; a browser sometimes does.
+            run.cloudflare_blocked.add(e.host)
+            note("blocked", str(e))
+            self._queue_for_browser(run, cand)
             return None
         except RateLimited as e:
             run.exhausted.add(e.host)
@@ -249,9 +300,14 @@ class Fetcher:
 
         if r.status in BLOCKED_STATUSES:
             check = r.headers.get(CHALLENGE_HEADER)
-            note("blocked", "sign-in required" if check == SIGN_IN else "bot check" if check else f"HTTP {r.status}")
-            if cand.via == "direct":
-                run.browser_queue.append(cand)
+            if check:
+                detail = "sign-in required" if check == SIGN_IN else "bot check"
+            elif code := cloudflare_error(r.text):
+                detail = f"blocked by Cloudflare at {host} (error {code})"
+            else:
+                detail = f"HTTP {r.status}"
+            note("blocked", detail)
+            self._queue_for_browser(run, cand)
             return None
         if r.status >= 400:
             note("failed", f"HTTP {r.status}")
@@ -277,8 +333,7 @@ class Fetcher:
             page = parse_page(r.text, r.url)
             if looks_like_challenge(r.text, page.title):
                 note("blocked", "bot check")
-                if cand.via == "direct":
-                    run.browser_queue.append(cand)
+                self._queue_for_browser(run, cand)
                 return None
             sources.update_from_page(run.paper, page)
             if (pdf_url := page.pdf_url) and depth < 2:
@@ -296,6 +351,12 @@ class Fetcher:
 
         note("failed", f"unexpected content type {r.content_type or 'unknown'}")
         return None
+
+    @staticmethod
+    def _queue_for_browser(run: _Run, cand: Candidate) -> None:
+        """Retry later in the browser: what refused plain HTTP may open there. XML is for APIs, not browsers."""
+        if cand.via == "direct" and cand.kind != "jats":
+            run.browser_queue.append(cand)
 
     @staticmethod
     def _may_need_session(cand: Candidate) -> bool:
@@ -333,7 +394,7 @@ class Fetcher:
 
     # -- results --------------------------------------------------------------------------
 
-    def _store(self, paper: Paper, found: Found) -> Record:
+    def _store(self, paper: Paper, found: Found, key: str | None = None) -> Record:
         if found.fmt == "pdf":
             text = pdf_to_text(found.content)
             if not paper.title:
@@ -351,7 +412,30 @@ class Fetcher:
             "via": found.candidate.via,
             "version": found.candidate.version,
         }
-        return self.library.save(paper, found.content, found.fmt, text, source)
+        return self.library.save(paper, found.content, found.fmt, text, source, key=key)
+
+    def _reason(self, run: _Run) -> tuple[str, str | None]:
+        """Why nothing worked, in a few words, and the page a person should open."""
+        attempts, paper = run.attempts, run.paper
+        doi_url = f"https://doi.org/{paper.doi}" if paper.doi else paper.url
+        via_proxy = proxied(self.config, doi_url) if self.config.proxy and doi_url else doi_url
+        first = lambda pred: next((a for a in attempts if pred(a)), None)  # noqa: E731
+        if first(lambda a: a.detail == "sign-in required"):
+            return "sign-in needed at the library proxy", via_proxy
+        if a := first(lambda a: a.detail.startswith("blocked by Cloudflare")):
+            return a.detail.split(" (error")[0].split(";")[0], a.url
+        if a := first(lambda a: a.detail == "bot check"):
+            return f"human check at {urlsplit(a.url).hostname}", a.url
+        if run.browser_queue and (self._browser_error or not self.use_browser):
+            first_queued = run.browser_queue[0]
+            if self._may_need_session(first_queued):
+                return "no open copy; the publisher refused plain HTTP (needs the browser)", via_proxy
+            return f"{urlsplit(first_queued.url).hostname} refused plain HTTP (needs the browser)", first_queued.url
+        if first(lambda a: a.source in ("publisher", "institution") and a.outcome in ("blocked", "no-pdf")):
+            if self.config.proxy:
+                return "no open copy, and the publisher gave no PDF through the proxy", via_proxy
+            return "no open copy; the publisher gave no PDF (no institutional proxy set)", doi_url
+        return "no full text found", doi_url
 
     def _hints(self, run: _Run) -> list[str]:
         hints = []

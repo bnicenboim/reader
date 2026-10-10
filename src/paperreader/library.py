@@ -14,6 +14,7 @@ from pathlib import Path
 from .models import Paper
 
 SIDECAR_VERSION = 1
+KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 
 TRANSLIT = str.maketrans(
     {"ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "ß": "ss", "æ": "ae", "Æ": "AE", "đ": "d", "Đ": "D",
@@ -130,6 +131,40 @@ class Library:
             return rec
         return None
 
+    def by_key(self, key: str) -> Record | None:
+        path = self.root / f"{key}.json"
+        if not KEY_RE.fullmatch(key) or not path.exists():
+            return None
+        return next((self._record(p, d) for p, d in self._sidecars() if p == path), None)
+
+    def _check_key(self, key: str, paper: Paper) -> None:
+        if not KEY_RE.fullmatch(key):
+            raise ValueError(f"{key!r} is not a usable key (letters, digits, and . _ + - after the first)")
+        taken = self.by_key(key)
+        if taken and not set(taken.paper.ids()) & set(paper.ids()):
+            raise ValueError(f"the key {key!r} is taken by another paper: {taken.paper.title}")
+
+    def rename(self, rec: Record, key: str) -> Record:
+        """Give a stored paper another key, e.g. its key in a bibliography."""
+        if key == rec.key:
+            return rec
+        self._check_key(key, rec.paper)
+        files = {}
+        for kind, path in rec.files.items():
+            files[kind] = f"{key}{path.suffix}"
+            os.replace(path, self.root / files[kind])
+        sidecar = {"paperreader": SIDECAR_VERSION, "paper": rec.paper.to_dict(), "source": rec.source, "files": files}
+        _atomic_write(self.root / f"{key}.json", json.dumps(sidecar, indent=2, ensure_ascii=False).encode())
+        (self.root / f"{rec.key}.json").unlink()
+        return self._record(self.root / f"{key}.json", sidecar)
+
+    def update_paper(self, rec: Record, paper: Paper) -> Record:
+        """Store richer metadata for a paper already in the library."""
+        sidecar = {"paperreader": SIDECAR_VERSION, "paper": paper.to_dict(), "source": rec.source,
+                   "files": {k: v.name for k, v in rec.files.items()}}
+        _atomic_write(self.root / f"{rec.key}.json", json.dumps(sidecar, indent=2, ensure_ascii=False).encode())
+        return self._record(self.root / f"{rec.key}.json", sidecar)
+
     def _free_key(self, paper: Paper) -> str:
         base = base_key(paper)
         key, n = base, 1
@@ -138,11 +173,17 @@ class Library:
             key = f"{base}-{n}"
         return key
 
-    def save(self, paper: Paper, content: bytes, fmt: str, text: str, source: dict) -> Record:
-        """Store the document (fmt "pdf" or "xml") and its extracted text."""
+    def save(self, paper: Paper, content: bytes, fmt: str, text: str, source: dict, key: str | None = None) -> Record:
+        """Store the document (fmt "pdf" or "xml") and its extracted text, under `key` if given."""
         self.root.mkdir(parents=True, exist_ok=True)
         existing = self._lookup(paper)
-        key = existing.key if existing else self._free_key(paper)
+        if key:
+            self._check_key(key, paper)
+            if existing and existing.key != key:
+                for path in [*existing.files.values(), self.root / f"{existing.key}.json"]:
+                    path.unlink(missing_ok=True)
+        else:
+            key = existing.key if existing else self._free_key(paper)
         source = {**source, "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         files = {fmt: f"{key}.{fmt}", "text": f"{key}.md"}
         _atomic_write(self.root / files[fmt], content)

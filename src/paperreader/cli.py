@@ -11,12 +11,17 @@ from pathlib import Path
 import click
 
 from . import config as config_mod
+from . import sections
+from .bibtex import bibtex
 from .browser import BrowserUnavailable
 from .browser import login as browser_login
+from .extract import is_pdf
 from .fetch import Fetcher, FetchFailed
 from .http import Cache, HTTPError, PoliteClient, RateLimited
-from .identifiers import UnrecognizedIdentifier, parse
+from .identifiers import DOI_RE, UnrecognizedIdentifier, normalize_doi, parse
 from .library import Library, Record
+from .models import Paper
+from .pending import Pending
 from .publishers import proxied
 from .ratelimit import QuotaExceeded, RateLimiter
 from .sources import crossref_search, hit_identifier, openalex_search
@@ -39,6 +44,10 @@ class App:
     def library(self) -> Library:
         return Library(self.config.library_dir)
 
+    @property
+    def pending(self) -> Pending:
+        return Pending(self.config.library_dir / "pending.json")
+
 
 def _err(msg: str) -> None:
     click.echo(msg, err=True)
@@ -59,7 +68,9 @@ def _search(app: App, query: str, n: int) -> list[dict]:
 
 
 def _identify(app: App, text: str):
-    """An identifier, or for free text the search hit whose title matches it closely."""
+    """An identifier, a key in the library, or for free text the search hit whose title matches it closely."""
+    if rec := app.library.by_key(text.strip()):
+        return parse(rec.paper.ids()[0])
     try:
         return parse(text)
     except UnrecognizedIdentifier:
@@ -121,44 +132,115 @@ def with_browser_options(f):
     return f
 
 
-@cli.command()
-@click.argument("papers", nargs=-1, required=True)
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-@click.option("--force", is_flag=True, help="Download again even if the paper is in the library.")
-@with_browser_options
-@click.pass_obj
-def get(app: App, papers, as_json, force, browser, visible, quiet):
-    """Download papers into the library and extract their text."""
-    fetcher = _fetcher(app, browser, visible, quiet)
-    results, failed = [], False
+def _read_list(stream) -> list[tuple[str | None, str]]:
+    """Lines of `key<TAB>identifier`, or just `identifier`; blank lines and # comments are skipped."""
+    items = []
+    for line in stream:
+        line = line.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key, tab, ident = line.partition("\t")
+        items.append((key.strip() or None, ident.strip()) if tab else (None, line.strip()))
+    return items
+
+
+EXPORT_FIELDS = {"key": "k", "libkey": "k", "year": 2000, "doi": "d", "first_author": "a"}
+
+
+def _export(rec: Record, key: str | None, directory: Path, name: str) -> Path:
+    p = rec.paper
+    fields = {"key": key or rec.key, "libkey": rec.key, "year": p.year or "", "doi": (p.doi or "").replace("/", "_"),
+              "first_author": p.authors[0] if p.authors else ""}
+    dest = directory / name.format(**fields)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(rec.text_path.read_bytes())
+    return dest
+
+
+def _fetch_all(app: App, fetcher: Fetcher, items, *, force=False, as_json=False, quiet=False,
+               export: Path | None = None, name: str = "{key}.md") -> bool:
+    """Get each (key, identifier); report as `paper get` does. Returns whether all succeeded."""
+    single = len(items) == 1 and not as_json
+    results, rows, noted = [], [], False
     try:
-        for text in papers:
+        for key, text in items:
+            label = key or text
             try:
                 ident = _identify(app, text)
                 if not quiet:
                     _err(f"{ident}:")
-                rec = fetcher.get(ident, force=force)
-                results.append({"input": text, "ok": True, **rec.to_dict()})
-                if not as_json:
-                    click.echo(_summary(rec))
+                rec = fetcher.get(ident, force=force, key=key)
+                app.pending.remove(rec.paper)
+                result = {"input": text, "ok": True, **rec.to_dict()}
+                if export:
+                    result["exported"] = str(_export(rec, key, export, name))
+                results.append(result)
+                src = rec.source
+                rows.append(("ok", key or rec.key, ", ".join(filter(None, (src.get("source"), src.get("version"))))))
+                if single:
+                    click.echo(_summary(rec) + (f"\n  exported: {result['exported']}" if export else ""))
             except FetchFailed as e:
-                failed = True
-                results.append({"input": text, "ok": False, "paper": e.paper.to_dict(),
-                                "attempts": [a.__dict__ for a in e.attempts], "hints": e.hints})
-                if not as_json:
-                    _err(f"{text}: {e}")
+                app.pending.add(e.paper, str(ident), e.reason, e.open_url, e.hints, key=key)
+                results.append({"input": text, "ok": False, "paper": e.paper.to_dict(), "reason": e.reason,
+                                "open": e.open_url, "attempts": [a.__dict__ for a in e.attempts], "hints": e.hints})
+                rows.append(("FAIL", label, e.reason))
+                noted = True
+                if single:
+                    _err(f"{text}: {e}\n  why:  {e.reason}" + (f"\n  open: {e.open_url}" if e.open_url else ""))
                     for h in e.hints:
                         _err(f"  hint: {h}")
-            except (click.UsageError, QuotaExceeded) as e:
-                failed = True
-                results.append({"input": text, "ok": False, "error": str(e)})
-                if not as_json:
-                    _err(f"{text}: {e}")
+                    _err("  (listed in `paper pending`)")
+            except (click.UsageError, QuotaExceeded, ValueError) as e:
+                msg = e.format_message() if isinstance(e, click.UsageError) else str(e)
+                results.append({"input": text, "ok": False, "error": msg})
+                rows.append(("FAIL", label, msg.splitlines()[0]))
+                if single:
+                    _err(f"{text}: {msg}")
     finally:
         fetcher.close()
     if as_json:
         click.echo(json.dumps(results, indent=2, ensure_ascii=False))
-    sys.exit(1 if failed else 0)
+    elif not single:
+        width = min(40, max(len(r[1]) for r in rows))
+        click.echo("\n".join(f"{status:4}  {label:{width}}  {detail}" for status, label, detail in rows))
+        if noted:
+            click.echo("(failed downloads are listed in `paper pending`)")
+    return all(r["ok"] for r in results)
+
+
+@cli.command()
+@click.argument("papers", nargs=-1)
+@click.option("--from", "from_file", type=click.File("r"),
+              help="Read papers from a file (- for stdin): `key<TAB>identifier` or `identifier` per line.")
+@click.option("--key", help="Store the paper under this key (one paper only), e.g. its bibliography key.")
+@click.option("--export", type=click.Path(file_okay=False, path_type=Path),
+              help="Also copy each paper's text into this directory.")
+@click.option("--name", default="{key}.md", show_default=True,
+              help="File name for --export; fields: {key}, {libkey}, {year}, {doi}, {first_author}.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option("--force", is_flag=True, help="Download again even if the paper is in the library.")
+@with_browser_options
+@click.pass_obj
+def get(app: App, papers, from_file, key, export, name, as_json, force, browser, visible, quiet):
+    """Download papers into the library and extract their text.
+
+    With several papers, ends with one line per paper: ok and the source, or why it failed.
+    Failures are kept in `paper pending`.
+    """
+    items = [(None, p) for p in papers] + (_read_list(from_file) if from_file else [])
+    if not items:
+        raise click.UsageError("give papers to get, or --from FILE")
+    if key:
+        if len(items) != 1:
+            raise click.UsageError("--key is for a single paper; give keys per line with --from")
+        items = [(key, items[0][1])]
+    try:
+        name.format(**EXPORT_FIELDS)
+    except (KeyError, IndexError, ValueError) as e:
+        raise click.UsageError(f"--name: unknown field {e}") from e
+    ok = _fetch_all(app, _fetcher(app, browser, visible, quiet), items, force=force, as_json=as_json, quiet=quiet,
+                    export=export, name=name)
+    sys.exit(0 if ok else 1)
 
 
 def _select_pages(text: str, pages: str) -> str:
@@ -174,10 +256,18 @@ def _select_pages(text: str, pages: str) -> str:
 @cli.command()
 @click.argument("paper")
 @click.option("--pages", help="Only these pages, e.g. 1-3,7 (PDF sources).")
+@click.option("--sections", "list_sections", is_flag=True, help="List the section headings, with their pages.")
+@click.option("--section", "wanted", multiple=True,
+              help="Only this section, e.g. Methods (repeatable). Matches the start of a heading.")
+@click.option("--no-refs", is_flag=True, help="Leave out the reference list.")
 @with_browser_options
 @click.pass_obj
-def read(app: App, paper, pages, browser, visible, quiet):
-    """Print a paper's text (fetching it first if needed)."""
+def read(app: App, paper, pages, list_sections, wanted, no_refs, browser, visible, quiet):
+    """Print a paper's text (fetching it first if needed).
+
+    Headings of PDF text are guessed (numbered lines, the usual section names), so
+    --sections shows what --section can find.
+    """
     fetcher = _fetcher(app, browser, visible, quiet=True if quiet else False)
     try:
         rec = fetcher.get(_identify(app, paper))
@@ -188,7 +278,21 @@ def read(app: App, paper, pages, browser, visible, quiet):
     finally:
         fetcher.close()
     text = rec.text_path.read_text()
-    click.echo(_select_pages(text, pages) if pages else text)
+    if pages:
+        text = _select_pages(text, pages)
+    if list_sections:
+        for h in sections.headings(text):
+            click.echo(f"{'p' + str(h.page) if h.page else '':5} {'  ' * (h.level - 1)}{h.title}")
+        return
+    if no_refs:
+        text = sections.without_references(text)
+    if wanted:
+        text, missing = sections.extract(text, list(wanted))
+        if missing:
+            _err(f"no section matching {', '.join(missing)}; see `paper read {paper} --sections`")
+            if not text:
+                sys.exit(1)
+    click.echo(text)
 
 
 @cli.command()
@@ -239,6 +343,115 @@ def list_(app: App, as_json):
         return
     for r in recs:
         click.echo(f"{r.key:50} {r.paper.year or '':5} {r.paper.title}")
+
+
+def _id_in_text(text: str) -> str | None:
+    """A DOI or arXiv id on the first pages of a paper, for `paper add` without an identifier."""
+    head = re.split(r"<!-- page 3 -->", text)[0]
+    if m := re.search(r"arXiv:\s*(\d{4}\.\d{4,5})", head):
+        return f"arXiv:{m.group(1)}"
+    if m := DOI_RE.search(head):
+        return f"doi:{normalize_doi(m.group(0).rstrip('⟩>]'))}"
+    return None
+
+
+@cli.command()
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("paper", required=False)
+@click.option("--key", help="Store the paper under this key.")
+@click.option("--force", is_flag=True, help="Replace the copy already in the library.")
+@click.pass_obj
+def add(app: App, file: Path, paper, key, force):
+    """Add a PDF (or JATS XML) you downloaded yourself, with its metadata.
+
+    PAPER identifies it (DOI, arXiv id, ...). Without it, the first DOI or arXiv id
+    on the PDF's first pages is used.
+    """
+    from .extract import pdf_to_text
+
+    content = file.read_bytes()
+    if not is_pdf(content) and b"<article" not in content[:5000]:
+        raise click.UsageError(f"{file} is not a PDF or JATS XML file")
+    if not paper:
+        paper = _id_in_text(pdf_to_text(content)) if is_pdf(content) else None
+        if not paper:
+            raise click.UsageError("no DOI or arXiv id found in the file; give one: paper add FILE ID")
+        _err(f"using {paper}, found in the file")
+    ident = _identify(app, paper)
+    if (rec := app.library.find(Paper.from_identifier(ident))) and not force:
+        raise click.ClickException(f"already in the library as {rec.key}; --force replaces it")
+    fetcher = _fetcher(app, False, None, quiet=True)
+    try:
+        rec = fetcher.add(ident, content, str(file.resolve()), key=key)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+    finally:
+        fetcher.close()
+    app.pending.remove(rec.paper)
+    click.echo(_summary(rec))
+
+
+@cli.command()
+@click.argument("papers", nargs=-1, required=True)
+@click.option("--key", help="Citation key (one paper only). Default: the library key when you give one, "
+                            "else surname, year and title word (roseberry2014skype).")
+@click.pass_obj
+def bib(app: App, papers, key):
+    """Print BibTeX entries for papers, from the metadata in the library (looked up if missing)."""
+    if key and len(papers) != 1:
+        raise click.UsageError("--key is for a single paper")
+    fetcher = _fetcher(app, False, None, quiet=True)
+    try:
+        for text in papers:
+            ident = _identify(app, text)
+            rec = app.library.by_key(text.strip()) or app.library.find(Paper.from_identifier(ident))
+            paper = rec.paper if rec else None
+            if paper is None or (paper.doi and not paper.pub_type):
+                described = fetcher.describe(ident)
+                if paper is not None:  # stored before publication details were collected: add them
+                    described.update(**{k: v for k, v in paper.to_dict().items() if k != "year"})
+                    rec = app.library.update_paper(rec, described)
+                paper = described
+            click.echo(bibtex(paper, key or (text.strip() if rec and rec.key == text.strip() else None)) + "\n")
+    finally:
+        fetcher.close()
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--tsv", is_flag=True, help="`key<TAB>identifier` lines, for `paper get --from -` elsewhere.")
+@click.option("--retry", is_flag=True, help="Try them all again now (a browser window opens for checks).")
+@click.option("--clear", is_flag=True, help="Forget them.")
+@click.pass_obj
+def pending(app: App, as_json, tsv, retry, clear):
+    """Papers that need a person: a human check, a sign-in, or a download by hand.
+
+    `paper get` adds every paper it could not fetch and removes it once it has it.
+    """
+    entries = app.pending.all()
+    if clear:
+        app.pending.clear()
+        click.echo(f"forgot {len(entries)} pending paper(s)")
+        return
+    if retry:
+        if not entries:
+            click.echo("nothing pending")
+            return
+        items = [(e.get("key"), e["id"]) for e in entries]
+        sys.exit(0 if _fetch_all(app, _fetcher(app, True, None, False), items) else 1)
+    if as_json:
+        click.echo(json.dumps(entries, indent=2, ensure_ascii=False))
+        return
+    for e in entries:
+        if tsv:
+            click.echo(f"{e.get('key') or ''}\t{e['id']}" if e.get("key") else e["id"])
+            continue
+        click.echo(f"{e.get('key') or e['id']}  {e.get('title') or ''}")
+        click.echo(f"  why:  {e.get('reason')}")
+        if e.get("open"):
+            click.echo(f"  open: {e['open']}")
+    if not entries and not tsv:
+        click.echo("nothing pending")
 
 
 @cli.command()
