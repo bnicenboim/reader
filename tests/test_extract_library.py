@@ -247,8 +247,11 @@ def test_pending_list(tmp_path):
     pending = Pending(tmp_path / "pending.json")
     p = Paper(title="Paywalled", doi="10.1/x")
     pending.add(p, "doi:10.1/x", "no open copy", "https://doi.org/10.1/x", [], key="smith2020")
-    pending.add(p, "doi:10.1/x", "sign-in needed", None, [])  # replaces the earlier entry
-    assert [(e["id"], e["reason"]) for e in pending.all()] == [("doi:10.1/x", "sign-in needed")]
+    pending.add(p, "doi:10.1/x", "sign-in needed", None, [])  # replaces the earlier entry, keeping its key (#8)
+    assert [(e["id"], e["key"], e["reason"]) for e in pending.all()] == [("doi:10.1/x", "smith2020", "sign-in needed")]
+    # A link to the paper keeps the DOI as the id to retry; a key of its own replaces the old one.
+    pending.add(p, "url:https://example.org/x.pdf", "HTTP 404", None, [], key="smith2020a")
+    assert [(e["id"], e["key"]) for e in pending.all()] == [("doi:10.1/x", "smith2020a")]
     pending.remove(Paper(doi="10.1/x", pmid="1"))
     assert pending.all() == []
 
