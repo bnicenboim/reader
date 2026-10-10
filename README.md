@@ -27,10 +27,11 @@ It tries the cheapest and most polite route first and stops at the first that wo
    `citation_pdf_url` tag, as Google Scholar does.
 4. **The publisher, over plain HTTP.** Works if your network has IP-based access
    (on campus, or on the VPN). Elsevier's API is used if you have a key.
-5. **A real browser** (Chromium through Playwright, with its own private profile)
-   for whatever refused plain HTTP. It reuses sessions you established with
-   `paper login`, for example "Access through your institution" on a publisher site.
-6. **Your library's proxy** (EZproxy, OpenAthens redirector), in that browser.
+5. **Your library's proxy** (EZproxy, OpenAthens redirector), in a real browser
+   (Chromium through Playwright, with its own private profile).
+6. **That browser for whatever refused plain HTTP.** It reuses sessions you
+   established with `paper login`, for example "Access through your institution"
+   on a publisher site.
 
 `paper resolve <id>` shows the candidates without downloading anything.
 

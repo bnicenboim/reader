@@ -97,6 +97,32 @@ def test_paywalled_paper_fails_with_hints(config, client, router):
     assert any("browser fallback is off" in h for h in e.value.hints)
 
 
+
+def test_proxy_comes_before_the_publisher_in_the_browser(config, client, router):
+    import httpx
+
+    from paperreader.http import Response
+
+    class FakeBrowser:
+        urls = []
+
+        def fetch(self, url, human_wait=0.0):
+            self.urls.append(url)
+            ok = url.startswith("https://proxy.example.edu/")
+            return Response(url, 200 if ok else 403, httpx.Headers({"content-type": "application/pdf"}),
+                            PDF if ok else b"")
+
+    config.browser_enabled = True
+    config.proxy = "https://proxy.example.edu/login?url={url}"
+    router.add(OPENALEX, json_body=openalex_work())
+    router.add("https://www.nature.com/articles/nature14539.pdf", status=403)
+    router.add("https://doi.org/10.1038/nature14539", status=403)
+    f = fetcher(config, client)
+    f._browser = FakeBrowser()
+    rec = f.get(parse("10.1038/nature14539"))
+    assert f._browser.urls == ["https://proxy.example.edu/login?url=https://www.nature.com/articles/nature14539.pdf"]
+    assert rec.source["via"] == "browser"
+
 def test_bot_wall_is_recognized(config, client, router):
     router.add("https://openreview.net/pdf?id=abc", headers={"content-type": "text/html"},
                content=b"<html><head><title>Just a moment...</title></head></html>")
@@ -116,6 +142,17 @@ def test_meta_refresh_is_followed(config, client, router):
     rec = fetcher(config, client).get(parse("10.1038/nature14539"))
     assert rec.source["url"] == "https://cdn.example/x.pdf"
 
+
+
+def test_ieee_pdf_is_found_by_article_number(config, client, router):
+    router.add("https://doi.org/10.1109/icassp.2023.123", status=302,
+               headers={"location": "https://ieeexplore.ieee.org/document/123"})
+    router.add("https://ieeexplore.ieee.org/document/123", headers={"content-type": "text/html"},
+               content=b"<html><head><title>A paper | IEEE Conference Publication</title></head></html>")
+    router.add("https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=123",
+               headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1109/icassp.2023.123"))
+    assert rec.source["url"] == "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=123"
 
 def test_pmc_full_text_xml(config, client, router):
     router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/search", json_body={"resultList": {"result": [{

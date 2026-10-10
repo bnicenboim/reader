@@ -7,8 +7,8 @@ Order of attempts:
   4. open-access locations from OpenAlex, Unpaywall and Semantic Scholar
   5. Elsevier's API (if you have a key) and the publisher's site over plain HTTP,
      which works when your network has IP-based access
-  6. a real browser for whatever refused plain HTTP, reusing your logged-in sessions
-  7. the institution's proxy, in the browser
+  6. the institution's proxy, in a real browser
+  7. that browser for whatever refused plain HTTP, reusing your logged-in sessions
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import sources
-from .browser import CHALLENGE_HEADER, Browser, BrowserUnavailable, display_available
+from .browser import CHALLENGE_HEADER, SIGN_IN, Browser, BrowserUnavailable, display_available
 from .config import Config
 from .extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
 from .html import looks_like_challenge, parse_page
@@ -32,7 +32,7 @@ from .models import Attempt, Candidate, Paper
 from .publishers import elsevier_candidates, proxied, proxy_host, publisher_candidates
 from .ratelimit import QuotaExceeded
 
-BLOCKED_STATUSES = {401, 402, 403, 429, 451}
+BLOCKED_STATUSES = {401, 402, 403, 418, 429, 451}  # 418: bot block (IEEE)
 # Sources whose pages may unlock with a logged-in session; worth a second try in the browser.
 SESSION_SOURCES = {"input", "publisher"}
 
@@ -184,7 +184,9 @@ class Fetcher:
                 return found
         if not self.use_browser:
             return None
-        later = [c.with_(via="browser") for c in run.browser_queue] + self._institutional(run.paper)
+        # The proxy first: without it a paywalled publisher page only fails, sometimes after
+        # a human check that keeps the user waiting.
+        later = self._institutional(run.paper) + [c.with_(via="browser") for c in run.browser_queue]
         for cand in later:
             if self._browser_error:
                 break
@@ -246,7 +248,8 @@ class Fetcher:
             return None
 
         if r.status in BLOCKED_STATUSES:
-            note("blocked", "bot check" if CHALLENGE_HEADER in r.headers else f"HTTP {r.status}")
+            check = r.headers.get(CHALLENGE_HEADER)
+            note("blocked", "sign-in required" if check == SIGN_IN else "bot check" if check else f"HTTP {r.status}")
             if cand.via == "direct":
                 run.browser_queue.append(cand)
             return None
@@ -360,7 +363,9 @@ class Fetcher:
                          "(enable it in the config, or drop --no-browser)")
         if any(a.via == "browser" and a.detail == "bot check" for a in run.attempts) and not self.visible:
             hints.append("a site asked for a human check; rerun with --visible and complete it in the window")
-        if blocked and not self.config.proxy:
+        if any(a.detail == "sign-in required" for a in run.attempts):
+            hints.append("the proxy asked you to sign in: run `paper login`, then try again")
+        elif blocked and not self.config.proxy:
             hints.append("for paywalled papers: set institution.proxy in the config, or sign in on the "
                          "publisher's site once with `paper login <url>` (\"access through your institution\")")
         elif blocked:

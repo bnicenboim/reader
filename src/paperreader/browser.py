@@ -11,24 +11,27 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 
 from .config import Config
-from .html import looks_like_challenge
+from .html import looks_like_challenge, looks_like_sign_in
 from .http import Response
 from .ratelimit import RateLimiter
 
 INSTALL_HINT = ("install the browser extra (pip install 'paperreader[browser]'), then run `paper install-browser`, "
                 "or set browser.channel = \"chrome\" to use an installed Chrome")
 SKIPPED_RESOURCES = {"image", "media", "font"}
-CHALLENGE_HEADER = "x-paperreader-challenge"  # set on responses that are an unsolved human check
+CHALLENGE_HEADER = "x-paperreader-challenge"  # set on responses that are an unsolved human check or sign-in
+SIGN_IN = "sign-in"  # CHALLENGE_HEADER value when the page waits for an institutional sign-in
 
 FETCH_JS = """async (url) => {
   const r = await fetch(url, {credentials: 'include'});
@@ -60,6 +63,53 @@ def _prefer_pdf_download(profile: Path) -> None:
     prefs.setdefault("plugins", {})["always_open_pdf_externally"] = True
     prefs.setdefault("download", {})["prompt_for_download"] = False
     prefs_path.write_text(json.dumps(prefs))
+
+
+def _forget_downloads(profile: Path) -> None:
+    """Clear Chromium's download history.
+
+    With an earlier download in its history (a Playwright temporary file, since deleted), a visible
+    Chromium crashes with SIGTRAP as soon as the next download starts (seen with Chromium 153).
+    """
+    history = profile / "Default" / "History"
+    if not history.exists():
+        return
+    try:
+        with closing(sqlite3.connect(history)) as db, db:
+            for table in ("downloads", "downloads_url_chains", "downloads_slices"):
+                db.execute(f"DELETE FROM {table}")
+    except sqlite3.Error:
+        pass
+
+
+SESSION_COOKIES_MAX_AGE = 24 * 3600  # servers expire their sessions sooner; this only bounds stale files
+
+
+def _session_cookies_path(config: Config) -> Path:
+    return config.state_dir / "session-cookies.json"
+
+
+def save_session_cookies(config: Config, cookies: list[dict]) -> None:
+    """Keep cookies that only last a browser session (EZproxy's, identity providers').
+
+    Chromium drops them when it exits, which would undo a `paper login` as soon as its window closes.
+    """
+    path = _session_cookies_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps({"saved_at": time.time(), "cookies": [c for c in cookies if c.get("expires", -1) < 0]})
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(data)
+
+
+def load_session_cookies(config: Config) -> list[dict]:
+    try:
+        data = json.loads(_session_cookies_path(config).read_text())
+    except (OSError, ValueError):
+        return []
+    if time.time() - data.get("saved_at", 0) > SESSION_COOKIES_MAX_AGE:
+        return []
+    return data.get("cookies", [])
 
 
 class _ProfileLock:
@@ -136,10 +186,13 @@ class Browser:
                 profile = self.config.browser_profile
                 self._lock = _ProfileLock(self.config.state_dir / "browser.lock", self.log).__enter__()
                 _prefer_pdf_download(profile)
+                _forget_downloads(profile)
                 self._ctx = self._pw.chromium.launch_persistent_context(
                     str(profile), headless=not self.visible, accept_downloads=True, no_viewport=self.visible,
                     **_launch_args(self.config),
                 )
+                if cookies := load_session_cookies(self.config):
+                    self._ctx.add_cookies(cookies)
         except Exception as e:
             self.close()
             raise BrowserUnavailable(f"could not start the browser ({str(e).splitlines()[0]}); {INSTALL_HINT}") from e
@@ -148,6 +201,10 @@ class Browser:
         try:
             # With cdp_url the browser is the user's own: leave it (and its context) running.
             if self._ctx is not None and not self.config.browser_cdp_url:
+                try:
+                    save_session_cookies(self.config, self._ctx.cookies())
+                except Exception:  # the browser crashed or was closed by hand
+                    pass
                 self._ctx.close()
             if self._pw is not None:
                 self._pw.stop()
@@ -187,26 +244,36 @@ class Browser:
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             except PlaywrightError as e:
                 # Navigating to a file that downloads aborts the navigation; that's what we want.
-                if "Download is starting" not in str(e) and "ERR_ABORTED" not in str(e):
+                if "Download is starting" not in str(e) and "ERR_ABORTED" not in str(e) and not page.is_closed():
                     raise
             told = False
             start = time.monotonic()
             while not downloads:
                 html, title = _snapshot(page)
                 challenged = html is not None and looks_like_challenge(html, title)
+                # Sign-in hops through identity providers; some pass by themselves, others wait for the user.
+                signing_in = self._signing_in(page.url)
+                waiting = challenged or signing_in
                 elapsed = time.monotonic() - start
-                if html is not None and not challenged and ("last" in nav or elapsed > 3):
+                if html is not None and not waiting and ("last" in nav or elapsed > 3):
                     break
-                if challenged and human_wait and not told:
-                    self.log(f"{urlsplit(url).hostname} wants a human check: complete it in the browser window "
-                             f"(waiting up to {human_wait:.0f} s)")
+                if waiting and human_wait and not told:
+                    what = "sign in" if signing_in else f"complete the human check of {urlsplit(url).hostname}"
+                    self.log(f"{what} in the browser window (waiting up to {human_wait:.0f} s)")
                     told = True
-                if elapsed > (human_wait if challenged and human_wait else 15):
+                if elapsed > (human_wait if waiting and human_wait else 15):
                     break
-                page.wait_for_timeout(500)
+                try:
+                    page.wait_for_timeout(500)
+                except PlaywrightError:
+                    if not page.is_closed():
+                        raise
+                    break  # a visible Chrome closes a new tab whose navigation turned into a download
 
             if downloads:
                 return self._save_download(downloads[0])
+            if page.is_closed():
+                raise RuntimeError("the browser closed the page before anything arrived")
 
             html, title = _snapshot(page)
             if page.evaluate("document.contentType") == "application/pdf":
@@ -217,9 +284,18 @@ class Browser:
             if html is not None and looks_like_challenge(html, title):
                 status = 403
                 headers[CHALLENGE_HEADER] = "1"
+            elif status == 418 and not self.visible:
+                # IEEE Xplore's answer to headless Chromium; a visible window gets the page.
+                headers[CHALLENGE_HEADER] = "1"
+            elif self._signing_in(page.url):
+                status = 401
+                headers[CHALLENGE_HEADER] = SIGN_IN
             return Response(page.url, status, headers, (html or "").encode())
         finally:
             page.close()
+
+    def _signing_in(self, url: str) -> bool:
+        return looks_like_sign_in(url, urlsplit(self.config.proxy).hostname if self.config.proxy else None)
 
     def _save_download(self, download) -> Response:
         fd, tmp = tempfile.mkstemp(suffix=".download")
@@ -250,16 +326,30 @@ def _snapshot(page) -> tuple[str | None, str | None]:
 def login(config: Config, url: str) -> None:
     """Open a visible browser on the private profile so the user can sign in; returns when it is closed."""
     try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeout
         from playwright.sync_api import sync_playwright
     except ImportError:
         raise BrowserUnavailable(f"no browser available; {INSTALL_HINT}") from None
     log = lambda s: print(s, file=sys.stderr)  # noqa: E731
     with _ProfileLock(config.state_dir / "browser.lock", log), sync_playwright() as p:
         _prefer_pdf_download(config.browser_profile)
+        _forget_downloads(config.browser_profile)
         ctx = p.chromium.launch_persistent_context(
             str(config.browser_profile), headless=False, no_viewport=True, **_launch_args(config)
         )
+        if cookies := load_session_cookies(config):
+            ctx.add_cookies(cookies)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(url)
         log("Sign in in the browser window. Close the window when you are done; the session is kept.")
-        ctx.wait_for_event("close", timeout=0)
+        # Once the window is closed the session cookies are gone, so save them while it is open.
+        while True:
+            try:
+                save_session_cookies(config, ctx.cookies())
+                ctx.wait_for_event("close", timeout=2000)
+                break
+            except PlaywrightTimeout:
+                continue
+            except PlaywrightError:
+                break

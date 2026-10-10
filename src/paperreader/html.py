@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 
 @dataclass
@@ -27,7 +27,7 @@ class PageInfo:
                 return urljoin(self.url, v)
         if self.pdf_links:
             return urljoin(self.url, self.pdf_links[0])
-        return None
+        return _ieee_pdf_url(self.url)
 
     @property
     def refresh_url(self) -> str | None:
@@ -45,14 +45,32 @@ class PageInfo:
         return None
 
 
+
+def _ieee_pdf_url(url: str) -> str | None:
+    """IEEE Xplore pages have no citation_pdf_url; the PDF is found by the article number in the URL.
+
+    Matches ieeexplore.ieee.org and its proxied form (ieeexplore-ieee-org.<proxy>).
+    """
+    parts = urlsplit(url)
+    m = re.match(r"/document/(\d+)", parts.path)
+    if m and (parts.hostname or "").startswith("ieeexplore"):
+        return urljoin(url, f"/stampPDF/getPDF.jsp?tp=&arnumber={m.group(1)}")
+    return None
+
 class _Parser(HTMLParser):
     def __init__(self, info: PageInfo):
         super().__init__(convert_charrefs=True)
         self.info = info
         self._in_title = False
         self._title: list[str] = []
+        self._noscript = 0
 
     def handle_starttag(self, tag, attrs):
+        if tag == "noscript":
+            self._noscript += 1
+        if self._noscript:
+            # For browsers without JavaScript, e.g. Microsoft's sign-in page refreshes to /jsdisabled.
+            return
         a = {k.lower(): (v or "") for k, v in attrs}
         if tag == "meta":
             name = (a.get("name") or a.get("property") or a.get("http-equiv") or "").lower()
@@ -68,6 +86,8 @@ class _Parser(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "title":
             self._in_title = False
+        elif tag == "noscript" and self._noscript:
+            self._noscript -= 1
 
     def handle_data(self, data):
         if self._in_title:
@@ -117,3 +137,30 @@ def looks_like_challenge(html: str, title: str | None = None) -> bool:
         return True
     head = html[:200_000].lower()
     return any(m in head for m in CHALLENGE_MARKERS)
+
+
+# Identity providers that institutional sign-in (EZproxy, Shibboleth, OpenAthens) passes through.
+SIGN_IN_HOSTS = (
+    "login.microsoftonline.com",
+    "login.live.com",
+    "accounts.google.com",
+    "engine.surfconext.nl",
+    "login.openathens.net",
+    "my.openathens.net",
+)
+SIGN_IN_HOST_PREFIXES = ("adfs.", "idp.", "sso.", "wayf.", "shibboleth.")
+SIGN_IN_PATHS = ("/adfs/ls", "/idp/profile/", "/saml2", "/simplesaml/", "/cas/login", "/shibboleth.sso/")
+
+
+def looks_like_sign_in(url: str, proxy_host: str | None = None) -> bool:
+    """Is this page part of an institutional sign-in rather than the content it leads to?"""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    path = parts.path.lower()
+    if proxy_host and host == proxy_host.lower() and path.startswith("/login"):
+        return True  # EZproxy's own login page, or its hand-off to the identity provider
+    return (
+        host in SIGN_IN_HOSTS
+        or host.startswith(SIGN_IN_HOST_PREFIXES)
+        or any(p in path for p in SIGN_IN_PATHS)
+    )
