@@ -2,8 +2,8 @@
 
 The browser runs with a private, persistent profile, so a login you complete once
 (`paper login`) is reused later. When a site shows a human-verification page, the
-browser is made visible and you complete the check yourself; nothing here solves
-CAPTCHAs or disguises the browser.
+browser is made visible and you complete the check yourself. The browser is not
+disguised as anything else.
 """
 
 from __future__ import annotations

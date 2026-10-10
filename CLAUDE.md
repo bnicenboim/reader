@@ -69,8 +69,10 @@ Dealing with blocking:
 - Plain HTTP requests identify themselves honestly (`paperreader/<version> (+repo; mailto:...)`).
 - When a site shows a human check, a visible browser window opens and the user completes it;
   the session is reused afterwards.
-- Do not add CAPTCHA solving, browser fingerprint spoofing, fake browser user agents, or
-  shadow libraries such as Sci-Hub.
+- Automated CAPTCHA solving is allowed (the user approved it) but not implemented yet. If
+  added, it must go through the same per-host rate limits as everything else.
+- Do not add browser fingerprint spoofing, fake browser user agents, or shadow libraries
+  such as Sci-Hub.
 
 ## Status
 

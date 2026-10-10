@@ -71,14 +71,15 @@ To reuse the logins of your everyday Chrome instead, start it with
 ## Bot walls
 
 Many publisher sites sit behind Cloudflare or similar checks that reject scripts.
-The tool deals with them in plain ways only:
+The tool deals with them like this:
 
 - Plain HTTP requests identify themselves honestly (`paperreader/0.1 (+repo; mailto:you)`).
   Some publishers serve PDFs to that but block clients that pretend to be a browser.
 - The browser fallback is a real browser. In the default `mode = "auto"` it runs
   headless, and when a site shows a human check it opens a visible window and waits
   for you to complete the check. The cleared session is then reused.
-- It does not solve CAPTCHAs, spoof browser fingerprints or use shadow libraries.
+- It does not solve CAPTCHAs automatically (yet), spoof browser fingerprints or use
+  shadow libraries.
 
 ## Politeness
 
