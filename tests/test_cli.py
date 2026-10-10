@@ -67,3 +67,21 @@ def test_add_a_pdf_downloaded_by_hand(run, router, config, tmp_path):
     rec = json.loads((config.library_dir / "lecun2015-deep-learning.json").read_text())
     assert rec["source"]["via"] == "by hand" and rec["paper"]["title"] == "Deep learning"
     assert run("add", str(pdf)).exit_code == 1  # already there; --force replaces it
+
+
+def test_read_shows_figures_with_absolute_paths(run, router, config):
+    pytest.importorskip("pymupdf")
+    from test_figures import make_paper_pdf
+
+    router.add(OPENALEX, json_body=WORK)
+    router.add("https://repository.example/x.pdf", headers={"content-type": "application/pdf"},
+               content=make_paper_pdf())
+    run("get", "-q", "10.1038/nature14539")
+    figdir = (config.library_dir / "lecun2015-deep-learning.figures").resolve()
+    out = run("read", "lecun2015-deep-learning", "--figures").output
+    assert out == (f"p2    Figure 1. A blue box, for testing.\n      {figdir}/p2-figure-1.png\n"
+                   f"p2    Table 1. Numbers.\n      {figdir}/p2-table-1.png\n")
+    text = run("read", "10.1038/nature14539").output
+    assert f"![Figure 1. A blue box, for testing.]({figdir}/p2-figure-1.png)" in text
+    # Papers stored before figures existed get them with `paper figures`.
+    assert run("figures", "lecun2015-deep-learning", "--rebuild", "--no-browser").output == out

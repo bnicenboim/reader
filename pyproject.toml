@@ -12,6 +12,8 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.49"]
+# Crops figures and tables out of PDFs. PyMuPDF is AGPL-3.0; without it, whole pages are rendered instead.
+figures = ["pymupdf>=1.26"]
 
 [project.scripts]
 paper = "paperreader.cli:main"

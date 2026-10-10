@@ -5,8 +5,9 @@
 `paper` (package `paperreader`, in `src/paperreader/`) is a command-line tool that
 downloads a research paper from a DOI, arXiv id, PMID/PMCID, ACL Anthology id,
 OpenReview id, OSF id, URL, exact title or library key. It stores the paper in the library
-(`~/papers` by default) as three files: the PDF (or JATS XML), a Markdown text
-version with `<!-- page N -->` markers, and a JSON metadata sidecar.
+(`~/papers` by default): the document (PDF, JATS XML, or arXiv's HTML plus its PDF), a Markdown
+text version (with `<!-- page N -->` markers for PDFs), a JSON metadata sidecar, and a
+`<key>.figures/` folder with an image of each figure and table, linked from the text.
 
 Goal: if a paper is open access or the user has institutional access to it, an
 agent should be able to fetch and read it without the user downloading it by
@@ -16,7 +17,7 @@ hand, and without putting unreasonable load on any server.
 
 ```console
 curl -LsSf https://astral.sh/uv/install.sh | sh   # only if uv is missing; installs to ~/.local/bin
-uv sync --all-extras         # install, including the Playwright browser extra
+uv sync --all-extras         # install, with the extras: browser (Playwright) and figures (PyMuPDF, AGPL)
 uv run paper install-browser # Chromium for the browser route, once per machine (~/.cache/ms-playwright)
 uv run pytest                # unit tests; mocked transport, never touch the network
 uvx ruff check src tests     # lint (line length 120)
@@ -40,19 +41,21 @@ runs the real papers from `docs/literature-review-use-case.md` (no browser, your
 | `browser.py` | Playwright with a persistent profile, `login`, human-check handling |
 | `fetch.py` | the pipeline: candidate order, attempts, browser retries, failure reason and hints |
 | `extract.py` | PDF to text (pypdfium2; drops HAL cover pages and watermarks, joins exponents) and JATS to Markdown |
+| `figures.py` | figure and table images: caption-anchored crops (PyMuPDF), whole-page renders (pypdfium2), markers |
+| `html_paper.py` | arXiv's LaTeXML HTML to Markdown (headings, `$LaTeX$`, tables, figure markers) |
 | `sections.py` | headings of the text (Markdown, or guessed for PDFs), one section, text without references |
 | `library.py` | storage, readable or user-chosen keys (`vaswani2017-attention-all-you-need`), lookup by any id or key |
 | `pending.py` | papers that need a person, kept in the library as `pending.json` |
 | `bibtex.py` | BibTeX entries from the stored metadata |
-| `cli.py` | `get`, `read`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `login`, `usage`, `install-browser`, `config` |
+| `cli.py` | `get`, `read`, `figures`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `login`, `usage`, `install-browser`, `config` |
 
 ## Fetch order
 
 Cheapest and most polite first; stop at the first route that works:
 
 1. The library, matched on any id (a paper fetched by arXiv id is found again by DOI).
-2. Open repositories: arXiv, ACL Anthology, OpenReview, PubMed Central full text via Europe PMC
-   and NCBI E-utilities. Preprint servers through their APIs: bioRxiv/medRxiv (by DOI) and OSF
+2. Open repositories: arXiv (its HTML version first, from arxiv.org or ar5iv, then the PDF), ACL
+   Anthology, OpenReview, PubMed Central full text via Europe PMC and NCBI E-utilities. Preprint servers through their APIs: bioRxiv/medRxiv (by DOI) and OSF
    (ids found in OpenAlex, Unpaywall or Semantic Scholar locations, or given directly).
 3. Open-access copies listed by OpenAlex, Unpaywall and Semantic Scholar.
    Versions of record come before preprints.
@@ -62,6 +65,10 @@ Cheapest and most polite first; stop at the first route that works:
    page fails there anyway, sometimes after a human check that waits for the user.
 
 Lookups are lazy: Unpaywall and Semantic Scholar are only called if the earlier candidates fail.
+
+After the text is found, figure images: crops from the PDF (for arXiv HTML and bioRxiv XML, from
+the paper's PDF, named as the candidate's `companion`), Europe PMC's zip for open-access PMC
+articles, or PMC's article page in the browser for author manuscripts (images then from NCBI's CDN).
 
 ## Rules to preserve
 
@@ -89,7 +96,10 @@ Verified on real papers: arXiv, ACL Anthology, PMLR, HAL (the green open-access 
 paywalled Nature paper) and PubMed Central. The browser's PDF download path works.
 The institutional proxy works: on 10 October 2026 an IEEE paper came through Tilburg's EZproxy
 after `paper login`, with the saved session and a visible window.
-There are 90 unit tests, all passing, and 21 network tests from the literature-review notes.
+Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
+Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
+complete; a few pages with unusual captions are rendered whole.
+There are 109 unit tests, all passing, and 24 network tests.
 
 Not verified:
 - The proxy route for publishers other than IEEE (AIP reached the article page through it).
@@ -158,6 +168,17 @@ Not verified:
   Headless, it shows Cloudflare's "Just a moment..."; in the visible window that follows, the check
   cleared by itself and the PDF arrived (from `europepmc.org/api/getPdf`).
 - pypdfium2 puts superscripts on their own line ("p = 3.2e" / "−6"); `extract._clean` joins them.
+- PyMuPDF's layout model (`pymupdf-layout`, `pymupdf4llm`) found captions but no pictures at all in
+  PNAS and Royal Society PDFs, and took 30 s on one paper; its Markdown split words and turned margin
+  text into tables. So figures are cropped by geometry instead: from each caption, grow over graphics,
+  labels and table cells until body text (body font size, lines of 30+ characters) or another caption;
+  figures upwards first, tables downwards. Running heads are found by repetition across pages.
+- arXiv's HTML lacks some figure images (PDF figures LaTeXML could not convert, e.g. Figure 1 of
+  2201.02639), hence the crops from the PDF. Its image paths are relative to `/html/`.
+- PMC's article pages show a proof-of-work check (`__identity_pow`) that a headless browser solves by
+  itself when it waits; the images are on cdn.ncbi.nlm.nih.gov, open to plain HTTP. Author manuscripts
+  in PMC's open-data bucket and Europe PMC's `supplementaryFiles` have no images (license).
+- IEEE PDFs fetched through the proxy carry "Authorized licensed use limited to: ..." on every page.
 
 ## Next steps
 

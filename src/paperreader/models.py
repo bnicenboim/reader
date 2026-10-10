@@ -72,11 +72,12 @@ class Candidate:
     """A place where the full text might be."""
 
     url: str
-    kind: str  # "pdf" (expected PDF), "landing" (HTML page that links to it), "jats" (JATS XML)
+    kind: str  # "pdf" (expected PDF), "landing" (HTML page that links to it), "jats" (JATS XML), "html" (arXiv)
     source: str  # where we learned about it: "arxiv", "openalex", "publisher", ...
     via: str = "direct"  # "direct" (plain HTTP) or "browser"
     version: str | None = None  # submittedVersion / acceptedVersion / publishedVersion
     headers: tuple[tuple[str, str], ...] = ()
+    companion: str | None = None  # a PDF of the same paper to take figure images from (for XML and HTML)
 
     def with_(self, **kw) -> Candidate:
         return replace(self, **kw)
