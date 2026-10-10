@@ -107,3 +107,13 @@ def test_user_agent_identifies_us(tmp_path, clock, router):
     c.get("https://x.example/")
     ua = router.requests[0].headers["user-agent"]
     assert ua.startswith("paperreader/") and "mailto:me@example.edu" in ua
+
+
+def test_api_keys_from_environment(tmp_path, monkeypatch):
+    from paperreader.config import load
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "from-env")
+    assert load(tmp_path / "missing.toml").openalex_key == "from-env"
+    path = tmp_path / "config.toml"
+    path.write_text('[keys]\nopenalex = "from-file"\n')
+    assert load(path).openalex_key == "from-file"

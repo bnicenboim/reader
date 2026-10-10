@@ -101,11 +101,27 @@ def _limit(d: dict, base: Limit) -> Limit:
     )
 
 
+# API keys can also come from the environment, e.g. secrets of a cloud environment.
+KEY_ENV_VARS = {
+    "openalex_key": "OPENALEX_API_KEY",
+    "semantic_scholar_key": "SEMANTIC_SCHOLAR_API_KEY",
+    "elsevier_key": "ELSEVIER_API_KEY",
+    "elsevier_insttoken": "ELSEVIER_INSTTOKEN",
+}
+
+
 def load(path: Path | None = None) -> Config:
     path = path or default_config_path()
     cfg = Config(path=path)
-    if not path.exists():
-        return cfg
+    if path.exists():
+        _load_file(cfg, path)
+    for attr, var in KEY_ENV_VARS.items():
+        if not getattr(cfg, attr) and os.environ.get(var):
+            setattr(cfg, attr, os.environ[var])
+    return cfg
+
+
+def _load_file(cfg: Config, path: Path) -> None:
     with path.open("rb") as f:
         data = tomllib.load(f)
 
@@ -139,7 +155,6 @@ def load(path: Path | None = None) -> Config:
         cfg.default_limit = _limit(limits.pop("default"), DEFAULT_LIMIT)
     for host, d in limits.items():
         cfg.limits[host.lower()] = _limit(d, cfg.limits.get(host.lower(), cfg.default_limit))
-    return cfg
 
 
 TEMPLATE = """\
@@ -161,8 +176,10 @@ library_dir = "~/papers"
 proxy = ""
 
 [keys]
+# Each key can instead be set in the environment: OPENALEX_API_KEY,
+# SEMANTIC_SCHOLAR_API_KEY, ELSEVIER_API_KEY, ELSEVIER_INSTTOKEN.
 semantic_scholar = ""   # optional; unauthenticated requests share a busy pool
-openalex = ""           # optional
+openalex = ""           # optional but recommended; free
 elsevier = ""           # optional; https://dev.elsevier.com, works from entitled IPs
 elsevier_insttoken = "" # optional; issued by Elsevier to your institution
 

@@ -49,7 +49,8 @@ Edit the config. The settings worth filling in:
 - `keys.openalex`: [free](https://help.openalex.org/api/authentication/). Without one,
   OpenAlex requests share a small daily budget with everyone on your IP address,
   and title search (10x the cost of a lookup) runs out first. Without OpenAlex,
-  search falls back to Crossref.
+  search falls back to Crossref. API keys can also be set as environment variables
+  (`OPENALEX_API_KEY`, `SEMANTIC_SCHOLAR_API_KEY`, `ELSEVIER_API_KEY`, `ELSEVIER_INSTTOKEN`).
 - `institution.proxy`: your library's proxy URL template, e.g.
   `https://login.ezproxy.example.edu/login?url={url}`. Your library's website
   documents it, usually as a "bookmarklet" or "proxy prefix".

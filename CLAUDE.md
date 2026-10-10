@@ -93,7 +93,8 @@ Not verified:
 - `email`: required by Unpaywall.
 - `keys.openalex`: free. Without it, OpenAlex shares a small daily allowance with everyone
   on the same IP address; once it runs out, title search falls back to Crossref, which
-  matches poorly (it did not find "Attention is all you need").
+  matches poorly (it did not find "Attention is all you need"). The key can also come from
+  the `OPENALEX_API_KEY` environment variable (how cloud sessions get it).
 - `institution.proxy`: the library's proxy URL template, then `paper login` once to sign in.
   Tilburg University's proxy URL format is still unknown; ask the user rather than guessing.
 
