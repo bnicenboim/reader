@@ -1,0 +1,146 @@
+import pytest
+from conftest import make_pdf
+
+from paperreader.fetch import Fetcher, FetchFailed
+from paperreader.identifiers import parse
+from paperreader.library import Library
+
+PDF = make_pdf(["Deep learning", "Yann LeCun"])
+OPENALEX = "https://api.openalex.org/works/doi:10.1038/nature14539"
+
+
+def openalex_work(**kw):
+    w = {
+        "display_name": "Deep learning",
+        "publication_year": 2015,
+        "doi": "https://doi.org/10.1038/nature14539",
+        "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/26017442"},
+        "authorships": [{"author": {"display_name": "Yann LeCun"}}, {"author": {"display_name": "Yoshua Bengio"}}],
+        "primary_location": {"source": {"display_name": "Nature"}},
+        "best_oa_location": None,
+        "locations": [],
+    }
+    w.update(kw)
+    return w
+
+
+def fetcher(config, client, **kw):
+    return Fetcher(config, client, Library(config.library_dir), log=lambda s: None, **kw)
+
+
+def test_open_access_copy_found_through_openalex(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "https://hal.science/hal-1", "version": "submittedVersion"},
+    ]))
+    router.add("https://hal.science/hal-1", headers={"content-type": "text/html"},
+               content=b'<html><head><meta name="citation_pdf_url" content="/hal-1/document"></head></html>')
+    router.add("https://hal.science/hal-1/document", headers={"content-type": "application/pdf"}, content=PDF)
+
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+
+    assert rec.key == "lecun2015-deep-learning"
+    assert rec.files["pdf"].read_bytes() == PDF
+    text = rec.text_path.read_text()
+    assert text.startswith("# Deep learning")
+    assert "Yann LeCun" in text and "<!-- page 1 -->" in text
+    assert rec.source["url"] == "https://hal.science/hal-1/document"
+
+
+def test_arxiv_location_becomes_arxiv_candidate(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "http://arxiv.org/abs/1234.56789", "pdf_url": "https://arxiv.org/pdf/1234.56789"},
+    ]))
+    router.add("https://arxiv.org/pdf/1234.56789", headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert rec.paper.arxiv == "1234.56789"
+    assert rec.source["source"] == "arxiv"
+
+
+def test_library_hit_needs_no_network(config, client, router):
+    router.add("https://arxiv.org/pdf/1234.56789", headers={"content-type": "application/pdf"}, content=PDF)
+    f = fetcher(config, client)
+    f.get(parse("arXiv:1234.56789"))
+    n = len(router.requests)
+    rec = f.get(parse("https://arxiv.org/abs/1234.56789v2"))
+    assert len(router.requests) == n
+    assert rec.paper.arxiv == "1234.56789"
+
+
+def test_library_matches_on_any_identifier(config, client, router):
+    router.add("https://arxiv.org/pdf/1234.56789", headers={"content-type": "application/pdf"}, content=PDF)
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "http://arxiv.org/abs/1234.56789"},
+    ]))
+    f = fetcher(config, client)
+    f.get(parse("arXiv:1234.56789"))
+    rec = f.get(parse("10.1038/nature14539"))  # OpenAlex reveals the arXiv id -> already have it
+    assert router.urls().count("https://arxiv.org/pdf/1234.56789") == 1
+    assert len(Library(config.library_dir).all()) == 1
+    assert rec.paper.arxiv == "1234.56789"
+
+
+def test_paywalled_paper_fails_with_hints(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work())
+    router.add("https://www.nature.com/articles/nature14539.pdf", status=403, content=b"<html>Forbidden</html>")
+    router.add("https://doi.org/10.1038/nature14539", status=302,
+               headers={"location": "https://www.nature.com/articles/nature14539"})
+    router.add("https://www.nature.com/articles/nature14539", headers={"content-type": "text/html"},
+               content=b"<html><head><title>Deep learning | Nature</title></head><body>Buy article</body></html>")
+
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse("10.1038/nature14539"))
+
+    outcomes = {(a.url, a.outcome) for a in e.value.attempts}
+    assert ("https://www.nature.com/articles/nature14539.pdf", "blocked") in outcomes
+    assert ("https://doi.org/10.1038/nature14539", "no-pdf") in outcomes
+    assert any("institution.proxy" in h for h in e.value.hints)
+    assert any("browser fallback is off" in h for h in e.value.hints)
+
+
+def test_bot_wall_is_recognized(config, client, router):
+    router.add("https://openreview.net/pdf?id=abc", headers={"content-type": "text/html"},
+               content=b"<html><head><title>Just a moment...</title></head></html>")
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse("openreview:abc"))
+    assert [a.detail for a in e.value.attempts if a.via == "direct"] == ["bot check"]
+
+
+def test_meta_refresh_is_followed(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work())
+    router.add("https://www.nature.com/articles/nature14539.pdf", status=404)
+    router.add("https://doi.org/10.1038/nature14539", headers={"content-type": "text/html"},
+               content=b"<html><head><meta HTTP-EQUIV=\"REFRESH\" content=\"2; url='/real'\"></head></html>")
+    router.add("https://doi.org/real", headers={"content-type": "text/html"},
+               content=b'<html><head><meta name="citation_pdf_url" content="https://cdn.example/x.pdf"></head></html>')
+    router.add("https://cdn.example/x.pdf", headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert rec.source["url"] == "https://cdn.example/x.pdf"
+
+
+def test_pmc_full_text_xml(config, client, router):
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/search", json_body={"resultList": {"result": [{
+        "title": "Sharing data.", "pubYear": "2007", "pmid": "1", "pmcid": "PMC9", "doi": "10.1371/x",
+        "authorList": {"author": [{"firstName": "Heather A", "lastName": "Piwowar"}]},
+    }]}})
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/PMC9/fullTextXML",
+               headers={"content-type": "application/xml"},
+               content=b"<?xml version='1.0'?><article><front><article-meta><title-group><article-title>Sharing data"
+                       b"</article-title></title-group></article-meta></front><body><sec><title>Intro</title>"
+                       b"<p>Sharing <italic>helps</italic>.</p></sec></body></article>")
+    rec = fetcher(config, client).get(parse("pmid:1"))
+    assert rec.key == "piwowar2007-sharing-data"
+    assert "xml" in rec.files
+    assert "## Intro\n\nSharing helps." in rec.text_path.read_text()
+
+
+def test_resolve_lists_candidates_without_downloading(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "https://hal.science/hal-1", "version": "submittedVersion"},
+    ]))
+    config.proxy = "https://login.proxy.example.edu/login?url={url}"
+    paper, cands = fetcher(config, client).resolve(parse("10.1038/nature14539"))
+    urls = [c.url for c in cands]
+    assert urls[0] == "https://hal.science/hal-1"
+    assert "https://www.nature.com/articles/nature14539.pdf" in urls
+    assert "https://login.proxy.example.edu/login?url=https://doi.org/10.1038/nature14539" in urls
+    assert all("hal.science" not in u for u in router.urls())

@@ -1,0 +1,109 @@
+import httpx
+import pytest
+
+from paperreader.config import Config, Limit
+from paperreader.http import Cache, PoliteClient, RateLimited, retry_after_seconds
+from paperreader.ratelimit import QuotaExceeded, RateLimiter
+
+
+def limiter(tmp_path, clock, limit):
+    return RateLimiter(tmp_path / "rl.sqlite", lambda host: limit, clock=clock, sleep=clock.sleep)
+
+
+def test_requests_to_a_host_are_spaced(tmp_path, clock):
+    rl = limiter(tmp_path, clock, Limit(interval=3.0))
+    start = clock.t
+    for _ in range(3):
+        rl.acquire("arxiv.org")
+    assert clock.t - start == pytest.approx(6.0)
+    # Other hosts are independent.
+    assert rl.acquire("example.org") == 0
+
+
+def test_budget_is_shared_between_processes(tmp_path, clock):
+    a = limiter(tmp_path, clock, Limit(interval=5.0))
+    b = limiter(tmp_path, clock, Limit(interval=5.0))
+    a.acquire("h")
+    assert b.acquire("h") == pytest.approx(5.0)
+
+
+def test_hourly_cap(tmp_path, clock):
+    rl = limiter(tmp_path, clock, Limit(interval=0.0, per_hour=2))
+    rl.acquire("h")
+    rl.acquire("h")
+    with pytest.raises(QuotaExceeded) as e:
+        rl.acquire("h")
+    assert e.value.window == "hour"
+    clock.t += 3601
+    rl.acquire("h")
+
+
+def test_penalize_pushes_next_slot(tmp_path, clock):
+    rl = limiter(tmp_path, clock, Limit(interval=1.0))
+    rl.penalize("h", 30)
+    assert rl.acquire("h") == pytest.approx(30)
+
+
+def test_limit_lookup_matches_parent_domains():
+    cfg = Config(limits={"sciencedirect.com": Limit(10.0)}, default_limit=Limit(5.0))
+    assert cfg.limit_for("www.sciencedirect.com").interval == 10.0
+    assert cfg.limit_for("example.com").interval == 5.0
+
+
+def test_retry_after_parsing():
+    assert retry_after_seconds("120") == 120
+    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT", now=1445412480 - 60) == pytest.approx(60)
+    assert retry_after_seconds("soon") is None
+
+
+def test_429_is_retried_after_waiting(client, router, clock):
+    calls = []
+
+    def flaky(request):
+        calls.append(clock.t)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "20"})
+        return httpx.Response(200, content=b"ok")
+
+    router.add("https://api.example.org/x", flaky)
+    r = client.get("https://api.example.org/x")
+    assert r.status == 200
+    assert calls[1] - calls[0] >= 20
+
+
+def test_long_retry_after_gives_up(client, router):
+    router.add("https://api.example.org/x", status=429, headers={"retry-after": "3600"})
+    with pytest.raises(RateLimited):
+        client.get("https://api.example.org/x")
+
+
+def test_each_redirect_hop_is_rate_limited(client, router, clock):
+    router.add("https://doi.org/10.1/x", status=302, headers={"location": "https://publisher.example/a"})
+    router.add("https://publisher.example/a", status=302, headers={"location": "/b"})
+    router.add("https://publisher.example/b", content=b"page")
+    r = client.get("https://doi.org/10.1/x")
+    assert r.url == "https://publisher.example/b"
+    assert r.history == ["https://doi.org/10.1/x", "https://publisher.example/a"]
+    assert sum(clock.slept) == pytest.approx(1.0)  # second hit on publisher.example waited
+
+
+def test_api_answers_are_cached(client, router):
+    router.add("https://api.example.org/w", json_body={"a": 1})
+    assert client.get_json("https://api.example.org/w", {"q": "1"}, secret_params={"api_key": "s"}) == {"a": 1}
+    assert client.get_json("https://api.example.org/w", {"q": "1"}, secret_params={"api_key": "s"}) == {"a": 1}
+    assert len(router.requests) == 1
+    assert "api_key=s" in router.urls()[0]
+
+
+def test_missing_records_are_none(client, router):
+    assert client.get_json("https://api.example.org/missing") is None
+
+
+def test_user_agent_identifies_us(tmp_path, clock, router):
+    cfg = Config(email="me@example.edu", state_dir=tmp_path)
+    c = PoliteClient(cfg, limiter(tmp_path, clock, Limit(0)), Cache(tmp_path / "c.sqlite"),
+                     transport=httpx.MockTransport(router))
+    router.add("https://x.example/", content=b"")
+    c.get("https://x.example/")
+    ua = router.requests[0].headers["user-agent"]
+    assert ua.startswith("paperreader/") and "mailto:me@example.edu" in ua
