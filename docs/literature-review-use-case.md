@@ -41,6 +41,30 @@ Tilburg University network, without the browser.
     guessed: numbered headings in sequence, Roman numerals, the usual section names.
 12. Exponents split onto their own line are joined: "p = 3.2e−6".
 
+Items 13 and 14 (GitHub issues #4 and #5) were addressed later on 10 October 2026:
+
+13. A human check that is shown and not completed marks its site. The paper's other pages
+    on that site are skipped, later papers in the same run open no window for it, and for
+    12 hours (`browser.check_memory_hours`) later runs that are not `--visible` skip it too;
+    the paper fails at once and goes to `paper pending`. `--visible` and `paper pending
+    --retry` ask again, and a passed check clears the mark. One paper waits for a person at
+    most 180 s (`browser.paper_wait`). Closing the window or the tab during a check skips
+    the paper; before, it counted as a failed page and the next page opened another check.
+    The log names the site where the check is shown (www.science.org, not doi.org). Tested
+    with a fake browser and with headless Chromium on a local server, not on Science itself.
+    Not checked: why the checks did not pass. The "page without a PDF link" notes now give
+    the page's title, so the next run shows whether those pages were unrecognised checks.
+14. Before a download is stored, its first two pages must show the DOI (or arXiv id or
+    PMCID) or 85% of the title's distinctive words close together; otherwise it is rejected
+    with "the download does not match the requested paper" and the next candidate is tried.
+    A URL that is the source of another library entry is refused. `paper verify` checks the
+    library (read-only unless `--remove`); on the library of 10 October 2026 it finds the
+    Versace entry and nothing else. The cause of the wrong download was not found. With
+    headless Chromium on a local server: a page receives only downloads started by its own
+    frames or its popups; a process killed mid-download or with a tab open leaves no tab to
+    restore and no download that the next start resumes. A visible window's session restore
+    and the Elsevier and Cell.com pages themselves were not tested.
+
 ## Missing download routes
 
 1. **bioRxiv and medRxiv.** `www.biorxiv.org` answered with rate limiting

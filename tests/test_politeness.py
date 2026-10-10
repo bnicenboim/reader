@@ -44,6 +44,28 @@ def test_penalize_pushes_next_slot(tmp_path, clock):
     assert rl.acquire("h") == pytest.approx(30)
 
 
+def test_unfinished_checks_are_remembered_for_a_while(tmp_path, clock):
+    a = limiter(tmp_path, clock, Limit(interval=1.0))
+    a.mark_check("Science.org", "https://www.science.org/doi/pdf/10.1/x")
+    b = limiter(tmp_path, clock, Limit(interval=1.0))  # another process
+    assert b.unfinished_check("science.org", within=3600) == "https://www.science.org/doi/pdf/10.1/x"
+    clock.t += 3601
+    assert b.unfinished_check("science.org", within=3600) is None
+    a.mark_check("science.org", "u")
+    b.clear_checks("science.org")
+    assert a.unfinished_check("science.org", within=3600) is None
+
+
+def test_check_waits_from_the_config(tmp_path):
+    from paperreader.config import load
+
+    path = tmp_path / "config.toml"
+    path.write_text("[browser]\npaper_wait = 60\ncheck_memory_hours = 2\n")
+    cfg = load(path)
+    assert (cfg.browser_paper_wait, cfg.browser_check_memory) == (60.0, 7200.0)
+    assert load(tmp_path / "missing.toml").browser_paper_wait == 180.0
+
+
 def test_limit_lookup_matches_parent_domains():
     cfg = Config(limits={"sciencedirect.com": Limit(10.0)}, default_limit=Limit(5.0))
     assert cfg.limit_for("www.sciencedirect.com").interval == 10.0

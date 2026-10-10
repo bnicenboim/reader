@@ -88,5 +88,5 @@ class Attempt:
     url: str
     source: str
     via: str
-    outcome: str  # ok | blocked | no-pdf | failed | skipped
+    outcome: str  # ok | blocked | no-pdf | failed | skipped | rejected (another paper)
     detail: str = ""

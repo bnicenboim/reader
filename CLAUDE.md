@@ -39,7 +39,8 @@ runs the real papers from `docs/literature-review-use-case.md` (no browser, your
 | `publishers.py` | PDF URL templates by DOI prefix, Elsevier API, institutional proxy URL rewriting |
 | `html.py` | landing-page metadata (`citation_pdf_url`, meta refresh), bot-wall, sign-in and Cloudflare-error detection |
 | `browser.py` | Playwright with a persistent profile, `login`, human-check handling |
-| `fetch.py` | the pipeline: candidate order, attempts, browser retries, failure reason and hints |
+| `fetch.py` | the pipeline: candidate order, attempts, browser retries, unfinished human checks, failure reason and hints |
+| `verify.py` | is a document the requested paper: DOI, arXiv id or PMCID, or most title words, on its first pages |
 | `extract.py` | PDF to text (pypdfium2; drops HAL cover pages and watermarks, joins exponents) and JATS to Markdown |
 | `figures.py` | figure and table images: caption-anchored crops (PyMuPDF), whole-page renders (pypdfium2), markers |
 | `html_paper.py` | arXiv's LaTeXML HTML to Markdown (headings, `$LaTeX$`, tables, figure markers) |
@@ -47,7 +48,7 @@ runs the real papers from `docs/literature-review-use-case.md` (no browser, your
 | `library.py` | storage, readable or user-chosen keys (`vaswani2017-attention-all-you-need`), lookup by any id or key |
 | `pending.py` | papers that need a person, kept in the library as `pending.json` |
 | `bibtex.py` | BibTeX entries from the stored metadata |
-| `cli.py` | `get`, `read`, `figures`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `login`, `usage`, `install-browser`, `config` |
+| `cli.py` | `get`, `read`, `figures`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `verify`, `login`, `usage`, `install-browser`, `config` |
 
 ## Fetch order
 
@@ -84,11 +85,19 @@ Politeness:
 Dealing with blocking:
 - Plain HTTP requests identify themselves honestly (`paperreader/<version> (+repo; mailto:...)`).
 - When a site shows a human check, a visible browser window opens and the user completes it;
-  the session is reused afterwards.
+  the session is reused afterwards. A check nobody completes is not shown again for that site: not
+  for the rest of the run, and not for `browser.check_memory_hours` (12) in later runs unless they are
+  `--visible` or `paper pending --retry`. One paper waits for a person at most `browser.paper_wait`
+  (180 s). Closing the window or tab during a check skips the paper.
 - Automated CAPTCHA solving is allowed (the user approved it) but not implemented yet. If
   added, it must go through the same per-host rate limits as everything else.
 - Do not add browser fingerprint spoofing, fake browser user agents, or shadow libraries
   such as Sci-Hub.
+
+Storage:
+- Every download is checked against the requested paper before it is stored (`verify.check`): its first
+  pages show the DOI, arXiv id or PMCID, or most of the title's words. A URL that is already the source of
+  another paper in the library is refused. `paper verify` runs the same check over the library.
 
 ## Status
 
@@ -99,7 +108,13 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 109 unit tests, all passing, and 24 network tests.
+There are 136 unit tests, all passing, and 24 network tests.
+
+The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
+headless Chromium against a local server (check not completed, mark remembered by the next process,
+tab or browser closed during the wait). It has not been tried on a real site with a visible window.
+The download check (issue #5) finds no mismatch among the 39 papers in the library of 10 October 2026,
+and finds the one known wrong entry.
 
 Not verified:
 - The proxy route for publishers other than IEEE (AIP reached the article page through it).
@@ -168,6 +183,22 @@ Not verified:
   Headless, it shows Cloudflare's "Just a moment..."; in the visible window that follows, the check
   cleared by itself and the PDF arrived (from `europepmc.org/api/getPdf`).
 - pypdfium2 puts superscripts on their own line ("p = 3.2e" / "−6"); `extract._clean` joins them.
+- On 10 October 2026 a browser download stored Lisman & Grace 2005 (fetched 3 minutes earlier by another
+  process) under Versace et al. 2018; the sidecar's URL was the Lisman PDF's. The cause is unknown. Ruled
+  out on a local server with headless Chromium: Playwright gives a page only the downloads its own frames
+  or its popups start, not those of other tabs; after a process is killed mid-download or with a tab
+  open, the next start neither restores the tab nor requests the file again. Not tested: a visible
+  window's session restore, and the Elsevier/Cell.com pages themselves (a site redirect or script that
+  sends the page to the last PDF would explain it). Hence the content check before storing.
+- Title words alone barely tell papers of one field apart: on the first two pages of the library's 39
+  papers, other papers' titles reached 4 of 5 and 6 of 8 of their distinctive words, while every paper had
+  all of its own. The check needs 85% of the words (all of them up to six) within about twice the title's
+  length. The DOI settles most cases before that: 37 of the 39 print it on the first two pages.
+- Cloudflare checks shown to the user in the automated Chromium were never passed (Science, 10 October
+  2026). Whether Cloudflare rejects the automated browser itself is not known; changing how the browser
+  presents itself is ruled out above, so such a site is asked once and then left to `paper pending`.
+- The browser's log of a human check names the host where the page ended up (www.science.org), not the
+  requested one (doi.org); unfinished checks are kept per site in `ratelimit.sqlite` (table `checks`).
 - PyMuPDF's layout model (`pymupdf-layout`, `pymupdf4llm`) found captions but no pictures at all in
   PNAS and Royal Society PDFs, and took 30 s on one paper; its Markdown split words and turned margin
   text into tables. So figures are cropped by geometry instead: from each caption, grow over graphics,

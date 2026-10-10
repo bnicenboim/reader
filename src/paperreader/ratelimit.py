@@ -3,6 +3,9 @@
 An agent may run several `paper` commands at once, so the budget lives in a
 SQLite file rather than in memory. Each request reserves the next free slot for
 its host inside a write transaction, then sleeps until that slot arrives.
+
+The same file remembers hosts whose human check was shown and not completed, so that
+later processes do not open a window for them again.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ class RateLimiter:
             CREATE TABLE IF NOT EXISTS hosts (host TEXT PRIMARY KEY, next_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS requests (host TEXT NOT NULL, at REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS requests_host_at ON requests(host, at);
+            CREATE TABLE IF NOT EXISTS checks (host TEXT PRIMARY KEY, at REAL NOT NULL, url TEXT);
             """
         )
         self._limit_for = limit_for
@@ -96,6 +100,24 @@ class RateLimiter:
             "ON CONFLICT(host) DO UPDATE SET next_at = MAX(next_at, excluded.next_at)",
             (host, until),
         )
+
+    def mark_check(self, host: str, url: str) -> None:
+        """Remember that `host` showed a human check that nobody completed, on the way to `url`."""
+        self._db.execute("INSERT OR REPLACE INTO checks (host, at, url) VALUES (?, ?, ?)",
+                         (host.lower(), self._clock(), url))
+
+    def unfinished_check(self, host: str, within: float) -> str | None:
+        """The URL that led to a check at `host` nobody completed in the last `within` seconds, if any."""
+        row = self._db.execute("SELECT url FROM checks WHERE host = ? AND at > ?",
+                               (host.lower(), self._clock() - within)).fetchone()
+        return row[0] if row else None
+
+    def clear_checks(self, host: str | None = None) -> None:
+        """Forget the unfinished check at `host`, or at every host."""
+        if host is None:
+            self._db.execute("DELETE FROM checks")
+        else:
+            self._db.execute("DELETE FROM checks WHERE host = ?", (host.lower(),))
 
     def usage(self) -> list[tuple[str, int, int]]:
         """(host, requests in the last hour, requests in the last day)."""

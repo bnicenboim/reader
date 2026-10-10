@@ -171,6 +171,19 @@ class Library:
         _atomic_write(self.root / f"{rec.key}.json", json.dumps(sidecar, indent=2, ensure_ascii=False).encode())
         return self._record(self.root / f"{rec.key}.json", sidecar)
 
+    def by_source_url(self, url: str) -> list[Record]:
+        """The stored papers that were downloaded from `url`."""
+        return [self._record(p, d) for p, d in self._sidecars() if d.get("source", {}).get("url") == url]
+
+    def set_aside(self, rec: Record, folder: str = "mismatched") -> Path:
+        """Move a paper's files out of the library, into a subfolder that lookups do not see."""
+        dest = self.root / folder
+        dest.mkdir(exist_ok=True)
+        for path in [*rec.files.values(), self.root / f"{rec.key}.json"]:
+            if path.exists():
+                os.replace(path, dest / path.name)
+        return dest
+
     def _free_key(self, paper: Paper) -> str:
         base = base_key(paper)
         key, n = base, 1
