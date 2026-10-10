@@ -83,6 +83,11 @@ The tool deals with them like this:
 - The browser fallback is a real browser. In the default `mode = "auto"` it runs
   headless, and when a site shows a human check it opens a visible window and waits
   for you to complete the check. The cleared session is then reused.
+- A check you do not complete is not shown again: that site's other pages are skipped
+  for the rest of the run, and for 12 hours (`check_memory_hours`) later runs open no
+  window for it; its papers fail at once and go to `paper pending`. `paper get --visible`
+  and `paper pending --retry` ask again. Closing the window or the tab during a check
+  skips the paper. One paper waits for you at most 180 s in all (`paper_wait`).
 - Cloudflare's error 1015 (a rate-limit ban, often given to scripts on the first request)
   is reported as "blocked by Cloudflare": waiting does not help, so it is not retried, and
   the URL is left for the browser.
@@ -142,6 +147,13 @@ and sign-ins cannot be done. Every paper `get` could not fetch goes on a list,
 `paper pending --retry` tries them again with a browser, and
 `paper add FILE [ID]` registers a PDF you downloaded yourself.
 
+**Checked downloads.** Before a download is stored, its first pages must show the
+paper's DOI (or arXiv id or PMCID) or most of its title's words; otherwise it is rejected
+("the download does not match the requested paper") and the next copy is tried. A URL
+that another paper in the library was downloaded from is refused. `paper verify` runs
+the same check over the library and reports mismatches; `--remove` moves them into
+`mismatched/` so that `paper get` fetches them again.
+
 **Reading parts of a paper.** `paper read ID --sections` lists the headings
 (Markdown headings for JATS sources, guessed for PDFs), `--section Results` prints
 one section (repeatable), and `--no-refs` leaves out the reference list. PDF text
@@ -159,6 +171,7 @@ is cleaned of HAL cover pages and "Downloaded from ..." watermarks.
 | `paper resolve ID` | metadata and candidate URLs, no download |
 | `paper search WORDS` | find papers by title/keywords |
 | `paper list` | the library |
+| `paper verify [ID...]` | check that stored documents are the papers they are stored as (`--remove`, `--json`) |
 | `paper login [URL]` | sign in, in the tool's browser profile |
 | `paper usage` | requests per host against their budgets |
 | `paper install-browser` | download Chromium for the browser fallback |

@@ -2,8 +2,8 @@
 
 The browser runs with a private, persistent profile, so a login you complete once
 (`paper login`) is reused later. When a site shows a human-verification page, the
-browser is made visible and you complete the check yourself. The browser is not
-disguised as anything else.
+browser is made visible and you complete the check yourself; closing the window or
+the tab instead skips the paper. The browser is not disguised as anything else.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -44,6 +45,24 @@ FETCH_JS = """async (url) => {
 
 class BrowserUnavailable(Exception):
     pass
+
+
+class CheckAbandoned(Exception):
+    """The window or tab was closed while we waited for a person to complete a check: skip the paper."""
+
+    def __init__(self, host: str, sign_in: bool = False):
+        self.host = host
+        super().__init__(f"the window was closed during the {'sign-in' if sign_in else 'human check'} at {host}")
+
+
+@dataclass
+class PersonWait:
+    """A check or sign-in that a person was asked to complete during one `Browser.fetch`."""
+
+    host: str  # where it was shown (after redirects), not the host of the requested URL
+    sign_in: bool  # an institutional sign-in rather than a human check
+    seconds: float = 0.0  # how long we waited
+    passed: bool = False  # whether the page got past it
 
 
 def display_available() -> bool:
@@ -169,10 +188,14 @@ class Browser:
         self._browser = None
         self._ctx = None
         self._lock = None
+        self._gone = False  # the browser was closed by hand
+        self.wait: PersonWait | None = None  # set by fetch()
 
     def _start(self) -> None:
-        if self._ctx is not None:
+        if self._ctx is not None and not self._gone:
             return
+        if self._ctx is not None:
+            self.close()  # someone closed the window: start a new browser
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -191,6 +214,7 @@ class Browser:
                     str(profile), headless=not self.visible, accept_downloads=True, no_viewport=self.visible,
                     **_launch_args(self.config),
                 )
+                self._ctx.on("close", lambda _: setattr(self, "_gone", True))
                 if cookies := load_session_cookies(self.config):
                     self._ctx.add_cookies(cookies)
         except Exception as e:
@@ -210,6 +234,7 @@ class Browser:
                 self._pw.stop()
         finally:
             self._pw = self._browser = self._ctx = None
+            self._gone = False
             if self._lock:
                 self._lock.__exit__()
                 self._lock = None
@@ -218,13 +243,17 @@ class Browser:
         self.close()
         self.visible = visible
 
-    def fetch(self, url: str, human_wait: float = 0.0) -> Response:
+    def fetch(self, url: str, human_wait: float = 0.0, may_ask: Callable[[str], bool] | None = None) -> Response:
         """Load `url` like a person would. Returns the PDF if one arrives, else the final page's HTML.
 
-        `human_wait`: how long to wait for someone to finish a verification check.
+        `human_wait`: how long to wait for someone to finish a verification check or sign-in.
+        `may_ask(host)`: whether to wait for the check shown at `host`; if not, the check page is returned.
+        Afterwards `self.wait` says where a person was asked, for how long, and whether the page got past it.
+        Raises `CheckAbandoned` when the window or tab is closed during that wait.
         """
         from playwright.sync_api import Error as PlaywrightError
 
+        self.wait = None
         self._start()
         self.limiter.acquire(urlsplit(url).hostname or "")
         page = self._ctx.new_page()
@@ -246,7 +275,7 @@ class Browser:
                 # Navigating to a file that downloads aborts the navigation; that's what we want.
                 if "Download is starting" not in str(e) and "ERR_ABORTED" not in str(e) and not page.is_closed():
                     raise
-            told = False
+            asked, asked_at = None, 0.0  # the check or sign-in a person was asked to complete
             start = time.monotonic()
             while not downloads:
                 html, title = _snapshot(page)
@@ -257,10 +286,14 @@ class Browser:
                 elapsed = time.monotonic() - start
                 if html is not None and not waiting and ("last" in nav or elapsed > 3):
                     break
-                if waiting and human_wait and not told:
-                    what = "sign in" if signing_in else f"complete the human check of {urlsplit(url).hostname}"
-                    self.log(f"{what} in the browser window (waiting up to {human_wait:.0f} s)")
-                    told = True
+                if waiting and human_wait and asked is None:
+                    host = urlsplit(page.url).hostname or ""
+                    if may_ask is None or may_ask(host):
+                        what = "sign in" if signing_in else f"complete the human check of {host}"
+                        self.log(f"{what} in the browser window (waiting up to {human_wait:.0f} s)")
+                        asked, asked_at = PersonWait(host, signing_in), time.monotonic()
+                    else:
+                        human_wait = 0
                 if elapsed > (human_wait if waiting and human_wait else 15):
                     break
                 try:
@@ -270,14 +303,25 @@ class Browser:
                         raise
                     break  # a visible Chrome closes a new tab whose navigation turned into a download
 
+            if asked is not None:
+                asked.seconds = time.monotonic() - asked_at
+                self.wait = asked
             if downloads:
-                return self._save_download(downloads[0])
+                r = self._save_download(downloads[0])
+                if self.wait:
+                    self.wait.passed = True
+                return r
             if page.is_closed():
+                if asked is not None:
+                    raise CheckAbandoned(asked.host, asked.sign_in)
                 raise RuntimeError("the browser closed the page before anything arrived")
 
             html, title = _snapshot(page)
             if page.evaluate("document.contentType") == "application/pdf":
-                return self._fetch_in_page(page, page.url)
+                r = self._fetch_in_page(page, page.url)
+                if self.wait:
+                    self.wait.passed = True
+                return r
             last = nav.get("last")
             status = last.status if last is not None else 200
             headers = httpx.Headers(last.headers if last is not None else {"content-type": "text/html"})
@@ -290,9 +334,14 @@ class Browser:
             elif self._signing_in(page.url):
                 status = 401
                 headers[CHALLENGE_HEADER] = SIGN_IN
+            if self.wait:
+                self.wait.passed = CHALLENGE_HEADER not in headers
             return Response(page.url, status, headers, (html or "").encode())
         finally:
-            page.close()
+            try:
+                page.close()
+            except PlaywrightError:  # the browser is gone
+                pass
 
     def _signing_in(self, url: str) -> bool:
         return looks_like_sign_in(url, urlsplit(self.config.proxy).hostname if self.config.proxy else None)

@@ -4,6 +4,7 @@ from conftest import make_pdf
 from paperreader.fetch import Fetcher, FetchFailed
 from paperreader.identifiers import parse
 from paperreader.library import Library
+from paperreader.models import Paper
 
 PDF = make_pdf(["Deep learning", "Yann LeCun"])
 OPENALEX = "https://api.openalex.org/works/doi:10.1038/nature14539"
@@ -93,6 +94,7 @@ def test_paywalled_paper_fails_with_hints(config, client, router):
     outcomes = {(a.url, a.outcome) for a in e.value.attempts}
     assert ("https://www.nature.com/articles/nature14539.pdf", "blocked") in outcomes
     assert ("https://doi.org/10.1038/nature14539", "no-pdf") in outcomes
+    assert "page without a PDF link: 'Deep learning | Nature'" in {a.detail for a in e.value.attempts}
     assert any("institution.proxy" in h for h in e.value.hints)
     assert any("browser fallback is off" in h for h in e.value.hints)
 
@@ -104,8 +106,9 @@ def test_proxy_comes_before_the_publisher_in_the_browser(config, client, router)
 
     class FakeBrowser:
         urls = []
+        wait = None
 
-        def fetch(self, url, human_wait=0.0):
+        def fetch(self, url, human_wait=0.0, may_ask=None):
             self.urls.append(url)
             ok = url.startswith("https://proxy.example.edu/")
             return Response(url, 200 if ok else 403, httpx.Headers({"content-type": "application/pdf"}),
@@ -347,3 +350,83 @@ def test_issue_year_from_crossref(config, client, router):
     assert rec.paper.year == 2014
     assert (rec.paper.volume, rec.paper.issue, rec.paper.pages) == ("85", "3", "956-970")
     assert rec.key == "lecun2014-deep-learning"
+
+
+TICS_DOI = "10.1016/j.tics.2018.07.005"
+VERSACE_WORK = {
+    "display_name": "Priors in Animal and Artificial Intelligence: Where Does Learning Begin?",
+    "publication_year": 2018, "doi": f"https://doi.org/{TICS_DOI}",
+    "authorships": [{"author": {"display_name": "Elisabetta Versace"}}],
+    "locations": [{"is_oa": True, "pdf_url": "https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf"},
+                  {"is_oa": True, "pdf_url": "https://repository.example/versace.pdf"}],
+}
+LISMAN_PDF = make_pdf(["Neuron, Vol. 46, 703-713, June 2, 2005, DOI 10.1016/j.neuron.2005.05.002",
+                       "The Hippocampal-VTA Loop: Controlling the Entry of Information",
+                       "into Long-Term Memory", "John E. Lisman and Anthony A. Grace",
+                       "In this article we develop the concept that the hippocampus and the midbrain",
+                       "dopaminergic neurons of the ventral tegmental area form a functional loop."])
+VERSACE_PDF = make_pdf(["Trends in Cognitive Sciences", "Priors in Animal and Artificial Intelligence:",
+                        "Where Does Learning Begin?", "Elisabetta Versace, Antone Martinho, Alex Kacelnik",
+                        "A major goal for the next generation of artificial intelligence is to build machines"])
+
+
+def test_a_download_of_another_paper_is_rejected_for_the_next_candidate(config, client, router):
+    router.add(f"https://api.openalex.org/works/doi:{TICS_DOI}", json_body=VERSACE_WORK)
+    router.add("https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf",
+               headers={"content-type": "application/pdf"}, content=LISMAN_PDF)
+    router.add("https://repository.example/versace.pdf", headers={"content-type": "application/pdf"},
+               content=VERSACE_PDF)
+    rec = fetcher(config, client).get(parse(TICS_DOI))
+    assert rec.source["url"] == "https://repository.example/versace.pdf"
+    assert [r.key for r in Library(config.library_dir).all()] == [rec.key]
+
+
+def test_a_mismatch_is_noted_and_nothing_is_stored(config, client, router):
+    router.add(f"https://api.openalex.org/works/doi:{TICS_DOI}", json_body={**VERSACE_WORK, "locations": [
+        VERSACE_WORK["locations"][0]]})
+    router.add("https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf",
+               headers={"content-type": "application/pdf"}, content=LISMAN_PDF)
+    router.add("https://doi.org/10.1016/j.tics.2018.07.005", status=403)
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse(TICS_DOI))
+    (a,) = [a for a in e.value.attempts if a.outcome == "rejected"]
+    assert a.url == "https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf"
+    assert a.detail.startswith("the download does not match the requested paper (")
+    assert Library(config.library_dir).all() == []
+
+
+def test_a_url_stored_for_another_paper_is_refused(config, client, router):
+    lisman = Library(config.library_dir).save(
+        Paper(title="The Hippocampal-VTA Loop", doi="10.1016/j.neuron.2005.05.002"), LISMAN_PDF, "pdf", "text",
+        {"source": "openalex", "url": "https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf"})
+    router.add(f"https://api.openalex.org/works/doi:{TICS_DOI}", json_body=VERSACE_WORK)
+    # Even a file that would pass the content check is refused from that URL.
+    router.add("https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf",
+               headers={"content-type": "application/pdf"}, content=VERSACE_PDF)
+    router.add("https://repository.example/versace.pdf", headers={"content-type": "application/pdf"},
+               content=VERSACE_PDF)
+    log = []
+    f = Fetcher(config, client, Library(config.library_dir), log=log.append)
+    rec = f.get(parse(TICS_DOI))
+    assert rec.source["url"] == "https://repository.example/versace.pdf"
+    assert any(line.split()[0] == "rejected" and f"already in the library as {lisman.key}" in line for line in log)
+    # The paper stored from that URL may be downloaded from it again.
+    router.add("https://api.openalex.org/works/doi:10.1016/j.neuron.2005.05.002", json_body={
+        "display_name": "The Hippocampal-VTA Loop", "doi": "https://doi.org/10.1016/j.neuron.2005.05.002",
+        "locations": [{"is_oa": True, "pdf_url": "https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf"}]})
+    router.add("https://www.cell.com/neuron/pdf/S0896-6273(05)00397-1.pdf",
+               headers={"content-type": "application/pdf"}, content=LISMAN_PDF)
+    assert f.get(parse("10.1016/j.neuron.2005.05.002"), force=True).key == lisman.key
+
+
+def test_the_title_is_looked_up_before_a_download_is_checked(config, client, router):
+    # OpenAlex lists a copy but has no title, and the copy does not print its DOI: without the title from
+    # Semantic Scholar it could not be told from another paper.
+    router.add(f"https://api.openalex.org/works/doi:{TICS_DOI}", json_body={
+        **VERSACE_WORK, "display_name": None, "locations": VERSACE_WORK["locations"][1:]})
+    router.add(f"https://api.semanticscholar.org/graph/v1/paper/DOI:{TICS_DOI}", json_body={
+        "title": VERSACE_WORK["display_name"], "year": 2018, "authors": [{"name": "Elisabetta Versace"}]})
+    router.add("https://repository.example/versace.pdf", headers={"content-type": "application/pdf"},
+               content=VERSACE_PDF)
+    rec = fetcher(config, client).get(parse(TICS_DOI))
+    assert rec.source["url"] == "https://repository.example/versace.pdf"

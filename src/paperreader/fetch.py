@@ -10,10 +10,14 @@ Order of attempts:
      which works when your network has IP-based access
   6. the institution's proxy, in a real browser
   7. that browser for whatever refused plain HTTP, reusing your logged-in sessions
+
+A human check that nobody completes is asked once: the site's other pages are skipped for the
+rest of the run, and for a while (`browser.check_memory_hours`) in later runs that are not --visible.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -22,7 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import sources
-from .browser import CHALLENGE_HEADER, SIGN_IN, Browser, BrowserUnavailable, display_available
+from .browser import CHALLENGE_HEADER, SIGN_IN, Browser, BrowserUnavailable, CheckAbandoned, display_available
 from .config import Config
 from .extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
 from .html import cloudflare_error, looks_like_challenge, parse_page
@@ -32,11 +36,18 @@ from .library import Library, Record
 from .models import Attempt, Candidate, Paper
 from .publishers import elsevier_candidates, proxied, proxy_host, publisher_candidates
 from .ratelimit import QuotaExceeded
+from .verify import check as check_document
+from .verify import head_text
 
 BLOCKED_STATUSES = {401, 402, 403, 418, 429, 451}  # 418: bot block (IEEE)
 # Sources whose pages may unlock with a logged-in session; worth a second try in the browser.
 SESSION_SOURCES = {"input", "publisher"}
 
+
+# Attempt details that name the host of a human check: "bot check at H", "human check at H not completed",
+# "the window was closed during the human check at H".
+CHECK_HOST_RE = re.compile(r"^(?:bot check(?: at)?|human check at|the window was closed during the human check at)\s*"
+                           r"([^\s:]*)")
 
 VERSION_RANK = {"publishedVersion": 0, "acceptedVersion": 1, None: 2, "submittedVersion": 3}
 
@@ -87,6 +98,15 @@ class _Run:
     exhausted: set[str] = field(default_factory=set)  # hosts out of budget
     cloudflare_blocked: set[str] = field(default_factory=set)  # hosts that answered with Cloudflare's error 1015
     looked_up: set[str] = field(default_factory=set)  # preprint server lookups done
+    unfinished: dict[str, str] = field(default_factory=dict)  # site -> the check there nobody completed
+    waited: float = 0.0  # seconds spent waiting for a person
+    abandoned: bool = False  # the window was closed during a check: skip the paper
+
+
+def _site(host: str) -> str:
+    """The host a check belongs to: www.science.org and science.org share one."""
+    host = host.lower()
+    return host[4:] if host.startswith("www.") else host
 
 
 class Fetcher:
@@ -98,6 +118,7 @@ class Fetcher:
         use_browser: bool = True,
         visible: bool | None = None,
         log: Callable[[str], None] = lambda s: print(s, file=sys.stderr),
+        recheck: bool = False,
     ):
         self.config = config
         self.client = client
@@ -106,9 +127,13 @@ class Fetcher:
         mode = config.browser_mode
         self.visible = (mode == "visible") if visible is None else visible
         self.may_show = visible is not False and mode == "auto" and display_available()
+        self.keep_visible = self.visible  # asked for a window throughout; otherwise only during a check
+        # Ask again at sites whose check was not completed in an earlier run (--visible, `pending --retry`).
+        self.recheck = recheck or self.visible
         self.log = log
         self._browser: Browser | None = None
         self._browser_error: str | None = None
+        self._unfinished: dict[str, str] = {}  # site -> the check there nobody completed in this run
 
     def close(self) -> None:
         if self._browser:
@@ -229,13 +254,13 @@ class Fetcher:
         # a human check that keeps the user waiting.
         later = self._institutional(run.paper) + [c.with_(via="browser") for c in run.browser_queue]
         for cand in later:
-            if self._browser_error:
+            if self._browser_error or run.abandoned:
                 break
             if found := self._attempt(run, cand):
                 return found
         return None
 
-    def _fetch(self, cand: Candidate) -> Response:
+    def _fetch(self, run: _Run, cand: Candidate) -> Response:
         if cand.via == "direct":
             return self.client.get(
                 cand.url,
@@ -244,13 +269,55 @@ class Fetcher:
             )
         if self._browser is None:
             self._browser = Browser(self.config, self.client.limiter, visible=self.visible, log=self.log)
-        r = self._browser.fetch(cand.url, human_wait=self.config.browser_challenge_wait if self.visible else 0)
-        if CHALLENGE_HEADER in r.headers and not self.visible and self.may_show:
+        r = self._browse(run, cand.url)
+        if (CHALLENGE_HEADER in r.headers and not self.visible and self.may_show and self._wait_left(run) > 0
+                and not self._unfinished_check(run, urlsplit(r.url).hostname or "")):
             # Let the user see the check and complete it; the session is kept afterwards.
             self.visible = True
             self._browser.reopen(visible=True)
-            r = self._browser.fetch(cand.url, human_wait=self.config.browser_challenge_wait)
+            r = self._browse(run, cand.url)
         return r
+
+    def _wait_left(self, run: _Run) -> float:
+        """How long this paper may still wait for a person: one check's wait, within the paper's total."""
+        return max(0.0, min(self.config.browser_challenge_wait, self.config.browser_paper_wait - run.waited))
+
+    def _browse(self, run: _Run, url: str) -> Response:
+        """One page in the browser. A person is asked about a check only where they have not given up on it."""
+        wait = self._wait_left(run) if self.visible else 0.0
+        try:
+            return self._browser.fetch(url, human_wait=wait, may_ask=lambda h: not self._unfinished_check(run, h))
+        finally:
+            if self._browser.wait:
+                self._after_wait(run, url)
+
+    def _after_wait(self, run: _Run, url: str) -> None:
+        """Remember whether the person got past the check, so a check nobody completes is not shown again."""
+        w = self._browser.wait
+        run.waited += w.seconds
+        site = _site(w.host)
+        if w.passed:
+            self._unfinished.pop(site, None)
+            self.client.limiter.clear_checks(site)
+            return
+        why = f"{'sign-in' if w.sign_in else 'human check'} at {w.host} not completed"
+        # Other pages of the paper at the same address lead to the same check.
+        run.unfinished.update({site: why, _site(urlsplit(url).hostname or ""): why})
+        self._unfinished[site] = why
+        if not w.sign_in:  # `paper login` is the way to sign in; a check has no other way
+            self.client.limiter.mark_check(site, url)
+        if not self.keep_visible:
+            self.visible = False  # nobody is being asked anything now: hide the window
+            self._browser.reopen(visible=False)
+
+    def _unfinished_check(self, run: _Run, host: str) -> str | None:
+        """Why not to ask a person about a check at `host`: they did not complete one there."""
+        site = _site(host)
+        if why := run.unfinished.get(site) or self._unfinished.get(site):
+            return why
+        if not self.recheck and self.client.limiter.unfinished_check(site, self.config.browser_check_memory):
+            return f"human check at {host} not completed earlier (--visible tries again)"
+        return None
 
     def _attempt(self, run: _Run, cand: Candidate, depth: int = 0) -> Found | None:
         if (cand.via, cand.url) in run.seen:
@@ -269,8 +336,11 @@ class Fetcher:
             note("skipped", f"blocked by Cloudflare at {host}")
             self._queue_for_browser(run, cand)
             return None
+        if cand.via == "browser" and (why := self._unfinished_check(run, host)):
+            note("skipped", why)
+            return None
         try:
-            r = self._fetch(cand)
+            r = self._fetch(run, cand)
         except QuotaExceeded as e:
             run.exhausted.add(e.host)
             note("skipped", str(e))
@@ -289,6 +359,12 @@ class Fetcher:
             self._browser_error = str(e)
             note("failed", str(e))
             return None
+        except CheckAbandoned as e:
+            run.abandoned = True
+            note("skipped", f"{e}: skipping this paper")
+            self._browser.close()  # the next paper starts with a new browser, hidden unless asked otherwise
+            self.visible = self.keep_visible
+            return None
         except (httpx.HTTPError, TooLarge, ValueError) as e:
             note("failed", f"{type(e).__name__}: {e}")
             return None
@@ -300,8 +376,11 @@ class Fetcher:
 
         if r.status in BLOCKED_STATUSES:
             check = r.headers.get(CHALLENGE_HEADER)
+            page_host = urlsplit(r.url).hostname or host
             if check:
                 detail = "sign-in required" if check == SIGN_IN else "bot check"
+                if check != SIGN_IN and _site(page_host) != _site(host):
+                    detail += f" at {page_host}"  # where it was shown, after redirects
             elif code := cloudflare_error(r.text):
                 detail = f"blocked by Cloudflare at {host} (error {code})"
             else:
@@ -317,6 +396,9 @@ class Fetcher:
             if cand.source == "elsevier-api" and pdf_info(r.content)["pages"] <= 1:
                 note("failed", "first-page preview only: not entitled from this network")
                 return None
+            if why := self._mismatch(run, r, "pdf"):
+                note("rejected", why)
+                return None
             note("ok", r.url if r.url != cand.url else "")
             return Found(r.content, "pdf", cand, r.url)
 
@@ -325,6 +407,9 @@ class Fetcher:
             if b"<body" not in r.content:
                 # NCBI returns the front matter alone when the publisher does not allow XML downloads.
                 note("failed", "XML without the full text")
+                return None
+            if why := self._mismatch(run, r, "xml"):
+                note("rejected", why)
                 return None
             note("ok")
             return Found(r.content, "xml", cand, r.url)
@@ -344,12 +429,24 @@ class Fetcher:
             if (target := page.refresh_url) and depth < 2:
                 note("page", "redirects to " + target)
                 return self._attempt(run, cand.with_(url=target), depth + 1)
-            note("no-pdf", "page without a PDF link")
+            note("no-pdf", "page without a PDF link" + (f": {page.title[:80]!r}" if page.title else ""))
             if cand.via == "direct" and self._may_need_session(cand):
                 run.browser_queue.append(cand)
             return None
 
         note("failed", f"unexpected content type {r.content_type or 'unknown'}")
+        return None
+
+    def _mismatch(self, run: _Run, r: Response, fmt: str) -> str | None:
+        """Why this document is not the requested paper, if it evidently is not."""
+        ids = set(run.paper.ids())
+        if other := next((o for o in self.library.by_source_url(r.url) if not set(o.paper.ids()) & ids), None):
+            return f"already in the library as {other.key}, another paper, from this URL"
+        if not run.paper.title:
+            self._complete_metadata(run)  # the title to compare with (lookups are cached)
+        verdict = check_document(run.paper, head_text(r.content, fmt))
+        if verdict.ok is False:
+            return f"the download does not match the requested paper ({verdict.detail})"
         return None
 
     @staticmethod
@@ -420,12 +517,12 @@ class Fetcher:
         doi_url = f"https://doi.org/{paper.doi}" if paper.doi else paper.url
         via_proxy = proxied(self.config, doi_url) if self.config.proxy and doi_url else doi_url
         first = lambda pred: next((a for a in attempts if pred(a)), None)  # noqa: E731
-        if first(lambda a: a.detail == "sign-in required"):
+        if first(lambda a: a.detail == "sign-in required" or a.detail.startswith("sign-in at")):
             return "sign-in needed at the library proxy", via_proxy
         if a := first(lambda a: a.detail.startswith("blocked by Cloudflare")):
             return a.detail.split(" (error")[0].split(";")[0], a.url
-        if a := first(lambda a: a.detail == "bot check"):
-            return f"human check at {urlsplit(a.url).hostname}", a.url
+        if a := first(lambda a: CHECK_HOST_RE.match(a.detail)):
+            return f"human check at {CHECK_HOST_RE.match(a.detail).group(1) or urlsplit(a.url).hostname}", a.url
         if run.browser_queue and (self._browser_error or not self.use_browser):
             first_queued = run.browser_queue[0]
             if self._may_need_session(first_queued):
@@ -445,15 +542,17 @@ class Fetcher:
         elif not self.use_browser and run.browser_queue:
             hints.append("some sites refused plain HTTP and the browser fallback is off "
                          "(enable it in the config, or drop --no-browser)")
-        if any(a.via == "browser" and a.detail == "bot check" for a in run.attempts) and not self.visible:
-            hints.append("a site asked for a human check; rerun with --visible and complete it in the window")
-        if any(a.detail == "sign-in required" for a in run.attempts):
+        if any(a.via == "browser" and CHECK_HOST_RE.match(a.detail) for a in run.attempts) and not self.recheck:
+            hints.append("a site asked for a human check: when you can do it, run `paper pending --retry` "
+                         "(or rerun with --visible) and complete it in the window")
+        if any(a.detail == "sign-in required" or a.detail.startswith("sign-in at") for a in run.attempts):
             hints.append("the proxy asked you to sign in: run `paper login`, then try again")
         elif blocked and not self.config.proxy:
             hints.append("for paywalled papers: set institution.proxy in the config, or sign in on the "
                          "publisher's site once with `paper login <url>` (\"access through your institution\")")
         elif blocked:
             hints.append("if your proxy session expired, sign in again with `paper login`")
-        if any(a.outcome == "skipped" for a in run.attempts):
+        if any(a.outcome == "skipped" and (a.detail == "host budget used up" or ": reached " in a.detail)
+               for a in run.attempts):
             hints.append("a per-host request budget was used up; try later or raise it in [rate_limits]")
         return hints

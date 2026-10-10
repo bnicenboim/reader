@@ -72,6 +72,8 @@ class Config:
     browser_channel: str = "chromium"  # or "chrome" / "msedge" to use an installed browser
     browser_executable: str | None = None
     browser_challenge_wait: float = 120.0  # seconds to wait for a human to finish a check
+    browser_paper_wait: float = 180.0  # seconds one paper may wait for a person in all
+    browser_check_memory: float = 12 * 3600.0  # seconds a check nobody completed keeps its host from asking again
 
     limits: dict[str, Limit] = field(default_factory=lambda: dict(BUILTIN_LIMITS))
     default_limit: Limit = DEFAULT_LIMIT
@@ -153,6 +155,9 @@ def _load_file(cfg: Config, path: Path) -> None:
     cfg.browser_channel = browser.get("channel") or cfg.browser_channel
     cfg.browser_executable = browser.get("executable") or None
     cfg.browser_challenge_wait = float(browser.get("challenge_wait", cfg.browser_challenge_wait))
+    cfg.browser_paper_wait = float(browser.get("paper_wait", cfg.browser_paper_wait))
+    if "check_memory_hours" in browser:
+        cfg.browser_check_memory = float(browser["check_memory_hours"]) * 3600
 
     limits = dict(data.get("rate_limits", {}))
     if "default" in limits:
@@ -201,6 +206,12 @@ channel = "chromium"
 # Drive your everyday Chrome (started with --remote-debugging-port=9222)
 # instead of the private profile, to reuse its logins:
 cdp_url = ""
+# Seconds to wait for you to complete one human check, and for all checks of one paper.
+# challenge_wait = 120
+# paper_wait = 180
+# A site whose check you did not complete opens no window for this many hours
+# (its papers fail at once and go to `paper pending`); --visible tries it anyway.
+# check_memory_hours = 12
 
 # Politeness budgets per host (parent domains match subdomains).
 # [rate_limits.default]

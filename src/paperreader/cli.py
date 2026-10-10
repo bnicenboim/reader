@@ -25,6 +25,7 @@ from .pending import Pending
 from .publishers import proxied
 from .ratelimit import QuotaExceeded, RateLimiter
 from .sources import crossref_search, hit_identifier, openalex_search
+from .verify import check_record
 
 
 class App:
@@ -113,15 +114,17 @@ def cli(ctx, config_path):
         raise click.ClickException(f"config: {e}") from e
 
 
-def _fetcher(app: App, browser: bool, visible: bool | None, quiet: bool) -> Fetcher:
+def _fetcher(app: App, browser: bool, visible: bool | None, quiet: bool, recheck: bool = False) -> Fetcher:
     log = (lambda s: None) if quiet else _err
-    return Fetcher(app.config, app.client, app.library, use_browser=browser, visible=visible, log=log)
+    return Fetcher(app.config, app.client, app.library, use_browser=browser, visible=visible, log=log,
+                   recheck=recheck)
 
 
 browser_options = [
     click.option("--browser/--no-browser", default=True, help="Fall back to a real browser (default: on)."),
     click.option("--visible/--headless", default=None,
-                 help="Show the browser window (default: only when a site wants a human check)."),
+                 help="Show the browser window (default: only when a site wants a human check). --visible also "
+                      "asks again at sites whose check was not completed earlier."),
     click.option("-q", "--quiet", is_flag=True, help="Don't log each attempt."),
 ]
 
@@ -438,7 +441,7 @@ def pending(app: App, as_json, tsv, retry, clear):
             click.echo("nothing pending")
             return
         items = [(e.get("key"), e["id"]) for e in entries]
-        sys.exit(0 if _fetch_all(app, _fetcher(app, True, None, False), items) else 1)
+        sys.exit(0 if _fetch_all(app, _fetcher(app, True, None, False, recheck=True), items) else 1)
     if as_json:
         click.echo(json.dumps(entries, indent=2, ensure_ascii=False))
         return
@@ -452,6 +455,50 @@ def pending(app: App, as_json, tsv, retry, clear):
             click.echo(f"  open: {e['open']}")
     if not entries and not tsv:
         click.echo("nothing pending")
+
+
+@cli.command()
+@click.argument("papers", nargs=-1)
+@click.option("--remove", is_flag=True, help="Move papers that do not match into the library's mismatched/ folder.")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_obj
+def verify(app: App, papers, remove, as_json):
+    """Check that each stored document is the paper it is stored as (all papers by default).
+
+    Its first pages should show the DOI, or most of the title's words: the check `paper get` makes
+    before storing a download. Changes nothing unless --remove is given.
+    """
+    recs = []
+    for text in papers:
+        rec = app.library.by_key(text.strip())
+        if rec is None:
+            try:
+                rec = app.library.find(Paper.from_identifier(parse(text)))
+            except UnrecognizedIdentifier:
+                pass
+        if rec is None:
+            raise click.UsageError(f"{text!r} is not in the library")
+        recs.append(rec)
+    results, counts = [], {True: 0, False: 0, None: 0}
+    for rec in recs or app.library.all():
+        verdict = check_record(rec)
+        counts[verdict.ok] += 1
+        result = {"key": rec.key, "title": rec.paper.title, "ok": verdict.ok, "detail": verdict.detail}
+        if verdict.ok is False and remove:
+            result["moved_to"] = str(app.library.set_aside(rec))
+        results.append(result)
+        if as_json or verdict.ok:
+            continue
+        click.echo(f"{'MISMATCH' if verdict.ok is False else '?':8}  {rec.key}  {rec.paper.title or ''}")
+        click.echo(f"          {verdict.detail}")
+        if "moved_to" in result:
+            click.echo(f"          moved to {result['moved_to']}; `paper get {rec.paper.ids()[0]}` fetches it again")
+    if as_json:
+        click.echo(json.dumps(results, indent=2, ensure_ascii=False))
+    else:
+        click.echo(f"{len(results)} paper(s) checked: {counts[True]} match, {counts[False]} mismatched, "
+                   f"{counts[None]} could not be checked")
+    sys.exit(1 if counts[False] else 0)
 
 
 @cli.command()

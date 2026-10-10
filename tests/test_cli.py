@@ -67,3 +67,36 @@ def test_add_a_pdf_downloaded_by_hand(run, router, config, tmp_path):
     rec = json.loads((config.library_dir / "lecun2015-deep-learning.json").read_text())
     assert rec["source"]["via"] == "by hand" and rec["paper"]["title"] == "Deep learning"
     assert run("add", str(pdf)).exit_code == 1  # already there; --force replaces it
+
+
+def test_verify_reports_mismatches_and_changes_nothing_without_remove(run, config):
+    from paperreader.library import Library
+    from paperreader.models import Paper
+
+    lib = Library(config.library_dir)
+    good_pdf = make_pdf(["Deep learning", "Yann LeCun, Yoshua Bengio and Geoffrey Hinton",
+                         "Deep learning allows computational models that are composed of multiple processing layers",
+                         "to learn representations of data with multiple levels of abstraction."])
+    good = lib.save(Paper(title="Deep learning", authors=["Yann LeCun"], year=2015, doi="10.1038/nature14539"),
+                    good_pdf, "pdf", "text", {"source": "openalex", "url": "https://repository.example/x.pdf"})
+    wrong_pdf = make_pdf(["The Hippocampal-VTA Loop: Controlling the Entry of Information into Long-Term Memory",
+                          "John E. Lisman and Anthony A. Grace", "DOI 10.1016/j.neuron.2005.05.002",
+                          "In this article we develop the concept that the hippocampus and the midbrain"])
+    bad = lib.save(Paper(title="Priors in Animal and Artificial Intelligence: Where Does Learning Begin?",
+                         authors=["Elisabetta Versace"], year=2018, doi="10.1016/j.tics.2018.07.005"),
+                   wrong_pdf, "pdf", "text", {"source": "publisher", "url": "https://www.cell.com/x.pdf"})
+    files = sorted(p.name for p in config.library_dir.iterdir())
+
+    r = run("verify")
+    assert r.exit_code == 1
+    assert f"MISMATCH  {bad.key}" in r.output and good.key not in r.output
+    assert r.output.splitlines()[-1] == "2 paper(s) checked: 1 match, 1 mismatched, 0 could not be checked"
+    assert sorted(p.name for p in config.library_dir.iterdir()) == files  # read-only
+
+    assert json.loads(run("verify", "--json", good.key).output)[0]["ok"] is True
+    assert run("verify", "doi:10.1038/nature14539").exit_code == 0
+
+    r = run("verify", "--remove")
+    assert f"moved to {config.library_dir / 'mismatched'}" in r.output
+    assert [rec.key for rec in lib.all()] == [good.key]
+    assert (config.library_dir / "mismatched" / f"{bad.key}.pdf").exists()
