@@ -263,6 +263,10 @@ class Fetcher:
 
         head = r.content[:2000].lstrip()
         if cand.kind == "jats" and (head.startswith(b"<?xml") or b"<article" in head):
+            if b"<body" not in r.content:
+                # NCBI returns the front matter alone when the publisher does not allow XML downloads.
+                note("failed", "XML without the full text")
+                return None
             note("ok")
             return Found(r.content, "xml", cand, r.url)
 

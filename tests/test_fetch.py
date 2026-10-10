@@ -133,6 +133,47 @@ def test_pmc_full_text_xml(config, client, router):
     assert "## Intro\n\nSharing helps." in rec.text_path.read_text()
 
 
+JATS_ARTICLE = (b"<article><front><article-meta><title-group><article-title>Talking to children matters"
+                b"</article-title></title-group></article-meta></front><body><sec><title>Method</title>"
+                b"<p>Recordings.</p></sec></body></article>")
+
+
+def test_pmc_author_manuscript_through_ncbi_efetch(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "landing_page_url": "https://www.ncbi.nlm.nih.gov/pmc/articles/5510534",
+         "version": "acceptedVersion"},
+    ]))
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/PMC5510534/fullTextXML", status=500)
+    router.add("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+               headers={"content-type": "text/xml"},
+               content=b"<?xml version='1.0'?><pmc-articleset>" + JATS_ARTICLE + b"</pmc-articleset>")
+
+    rec = fetcher(config, client).get(parse("10.1038/nature14539"))
+
+    assert rec.paper.pmcid == "PMC5510534"
+    assert rec.source["source"] == "ncbi-eutils"
+    assert "## Method\n\nRecordings." in rec.text_path.read_text()
+    assert "https://www.ncbi.nlm.nih.gov/pmc/articles/5510534" not in router.urls()
+
+
+def test_efetch_without_full_text_is_a_failure(config, client, router):
+    router.add(OPENALEX, json_body=openalex_work(locations=[
+        {"is_oa": True, "pdf_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6176610/pdf/x.pdf"},
+    ]))
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/PMC6176610/fullTextXML", status=500)
+    router.add("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi", headers={"content-type": "text/xml"},
+               content=b"<?xml version='1.0'?><pmc-articleset><article><front/><!--The publisher of this article "
+                       b"does not allow downloading of the full text in XML form.--></article></pmc-articleset>")
+    router.add("https://www.nature.com/articles/nature14539.pdf", status=403)
+    router.add("https://doi.org/10.1038/nature14539", status=403)
+
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse("10.1038/nature14539"))
+
+    assert ("ncbi-eutils", "failed", "XML without the full text") in {
+        (a.source, a.outcome, a.detail) for a in e.value.attempts}
+
+
 def test_resolve_lists_candidates_without_downloading(config, client, router):
     router.add(OPENALEX, json_body=openalex_work(locations=[
         {"is_oa": True, "landing_page_url": "https://hal.science/hal-1", "version": "submittedVersion"},

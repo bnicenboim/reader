@@ -18,6 +18,7 @@ CROSSREF = "https://api.crossref.org/works"
 S2 = "https://api.semanticscholar.org/graph/v1/paper"
 ARXIV_API = "https://export.arxiv.org/api/query"
 EUROPEPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 
 def arxiv_from_url(url: str | None) -> str | None:
@@ -34,6 +35,13 @@ def pmcid_from(value: str | None) -> str | None:
     if m:
         return m.group(0).upper()
     m = re.search(r"(\d+)/?$", value)
+    return f"PMC{m.group(1)}" if m else None
+
+
+def pmc_from_url(url: str | None) -> str | None:
+    """The PMCID of a PubMed Central or Europe PMC article URL."""
+    m = re.search(r"(?:ncbi\.nlm\.nih\.gov/pmc/articles|pmc\.ncbi\.nlm\.nih\.gov/articles|europepmc\.org/articles)"
+                  r"/(?:PMC)?(\d+)", url or "", re.IGNORECASE)
     return f"PMC{m.group(1)}" if m else None
 
 
@@ -64,6 +72,9 @@ def repository_candidates(paper: Paper) -> list[Candidate]:
         out.append(Candidate(f"https://openreview.net/pdf?id={paper.openreview}", "pdf", "openreview"))
     if paper.pmcid:
         out.append(Candidate(f"{EUROPEPMC}/{paper.pmcid}/fullTextXML", "jats", "europepmc", version="publishedVersion"))
+        # Europe PMC's API only serves the open-access subset. NCBI's efetch also serves author manuscripts
+        # (NIH public access), which the PMC website hides behind a bot check.
+        out.append(Candidate(f"{EUTILS}/efetch.fcgi?db=pmc&id={paper.pmcid[3:]}", "jats", "ncbi-eutils"))
     return out
 
 
@@ -112,6 +123,9 @@ def openalex(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]
         if aid := arxiv_from_url(landing) or arxiv_from_url(pdf):
             paper.update(arxiv=aid)
             continue  # covered by repository_candidates
+        if pmc := pmc_from_url(landing) or pmc_from_url(pdf):
+            paper.update(pmcid=pmc)
+            continue  # PMC pages sit behind a bot check; covered by repository_candidates
         if pdf:
             pdfs.append(Candidate(pdf, "pdf", "openalex", version=loc.get("version")))
         elif landing and "pubmed.ncbi.nlm.nih.gov" not in landing:
@@ -199,8 +213,9 @@ def unpaywall(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate
         if aid := arxiv_from_url(landing) or arxiv_from_url(pdf):
             paper.update(arxiv=aid)
             continue
-        if landing and (pmc := re.search(r"PMC\d+", landing)):
-            paper.update(pmcid=pmc.group(0))
+        if pmc := pmc_from_url(landing) or pmc_from_url(pdf):
+            paper.update(pmcid=pmc)
+            continue  # PMC pages sit behind a bot check; covered by repository_candidates
         if pdf:
             pdfs.append(Candidate(pdf, "pdf", "unpaywall", version=loc.get("version")))
         elif landing:

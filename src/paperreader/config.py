@@ -42,6 +42,7 @@ BUILTIN_LIMITS: dict[str, Limit] = {
     "api.unpaywall.org": Limit(0.2, per_day=20000),
     "api.semanticscholar.org": Limit(1.1, per_day=5000),
     "www.ebi.ac.uk": Limit(0.2, per_day=20000),
+    "eutils.ncbi.nlm.nih.gov": Limit(0.4, per_day=5000),  # E-utilities: 3 requests / s without a key
     "api.elsevier.com": Limit(1.0, per_hour=100, per_day=500),
     "doi.org": Limit(0.5, per_day=5000),
     "aclanthology.org": Limit(2.0, per_hour=200, per_day=1000),

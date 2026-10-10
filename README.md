@@ -19,7 +19,8 @@ It tries the cheapest and most polite route first and stops at the first that wo
 1. **Your library.** Anything already downloaded is matched on *any* of its ids
    (a paper fetched by arXiv id is found again by DOI). No network needed.
 2. **Open repositories reachable from the ids**: arXiv, ACL Anthology, OpenReview,
-   and PubMed Central full-text XML through the Europe PMC API.
+   and PubMed Central full-text XML through the Europe PMC API and NCBI E-utilities
+   (which also serve author manuscripts).
 3. **Open-access copies** listed by OpenAlex, Unpaywall and Semantic Scholar
    (institutional repositories, HAL, publisher OA versions...). Versions of
    record are preferred over preprints. Landing pages are followed through their
