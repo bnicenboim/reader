@@ -124,4 +124,6 @@ Not verified:
 ## Next steps
 
 - An MCP server so other agent apps can use the tool.
+- `docs/literature-review-use-case.md`: missing routes (bioRxiv API, OSF preprints) and features
+  an agent doing a literature review needed, from use on 10 October 2026.
 - Fetching arXiv LaTeX source for maths-heavy papers.
