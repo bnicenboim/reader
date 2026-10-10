@@ -37,12 +37,14 @@ DEFAULT_LIMIT = Limit(interval=5.0, per_hour=60, per_day=300)
 BUILTIN_LIMITS: dict[str, Limit] = {
     "export.arxiv.org": Limit(3.0, per_day=2000),  # arXiv API terms: 1 request / 3 s
     "arxiv.org": Limit(3.0, per_hour=200, per_day=1000),
+    "ar5iv.labs.arxiv.org": Limit(3.0, per_hour=200, per_day=1000),
     "api.openalex.org": Limit(0.2, per_day=20000),
     "api.crossref.org": Limit(0.2, per_day=20000),
     "api.unpaywall.org": Limit(0.2, per_day=20000),
     "api.semanticscholar.org": Limit(1.1, per_day=5000),
     "www.ebi.ac.uk": Limit(0.2, per_day=20000),
     "eutils.ncbi.nlm.nih.gov": Limit(0.4, per_day=5000),  # E-utilities: 3 requests / s without a key
+    "cdn.ncbi.nlm.nih.gov": Limit(1.0, per_hour=300, per_day=2000),  # PMC's figure images
     "api.elsevier.com": Limit(1.0, per_hour=100, per_day=500),
     "doi.org": Limit(0.5, per_day=5000),
     "api.biorxiv.org": Limit(1.0, per_day=5000),

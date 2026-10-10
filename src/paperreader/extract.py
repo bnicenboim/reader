@@ -5,14 +5,20 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 
+from .figures import FigureSpec, caption_label, label_of, marker
+
+XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
+
 
 def is_pdf(data: bytes) -> bool:
     return b"%PDF-" in data[:1024]
 
 
 # Publisher watermarks on every page, e.g. "Downloaded from http://royalsocietypublishing.org/... " / "by guest"
-# (Royal Society) or "Downloaded from https://academic.oup.com/... by guest on 4 March 2024" (OUP).
-WATERMARK_RE = re.compile(r"^Downloaded from https?://\S+.*\n(?:(?:by guest|on \d).*\n)*", re.MULTILINE)
+# (Royal Society), "Downloaded from https://academic.oup.com/... by guest on 4 March 2024" (OUP), or IEEE's
+# "Authorized licensed use limited to: <institution>. Downloaded on ... from IEEE Xplore. Restrictions apply."
+WATERMARK_RE = re.compile(r"^(?:Downloaded from https?://\S+.*\n(?:(?:by guest|on \d).*\n)*"
+                          r"|Authorized licensed use limited to: .*Restrictions apply\.[ \t]*\n)", re.MULTILINE)
 # pdfium puts a superscript on a line of its own: "p = 3.2e" / "−6" / ", d = 0.4", or "× 10" / "−6".
 EXPONENT_RE = re.compile(r"(\d(?:e|\s?[×x·]\s?10))\n([−–-]?\d{1,3})(?:\n(?=[,;:.)\]]))?")
 HAL_COVER_MARKS = ("HAL is a multi-disciplinary open access archive", "L’archive ouverte pluridisciplinaire HAL")
@@ -50,12 +56,12 @@ def pdf_info(data: bytes) -> dict:
         doc.close()
 
 
-def pdf_to_text(data: bytes) -> str:
-    """Text of every page, with `<!-- page N -->` markers so passages can be cited by page."""
+def pdf_pages(data: bytes) -> list[str]:
+    """The cleaned text of each page."""
     import pypdfium2 as pdfium
 
     doc = pdfium.PdfDocument(data)
-    parts = []
+    pages = []
     try:
         for i in range(len(doc)):
             page = doc[i]
@@ -63,12 +69,18 @@ def pdf_to_text(data: bytes) -> str:
             text = _clean(textpage.get_text_range())
             if i == 0 and len(doc) > 1 and _is_hal_cover(text):
                 text = "(HAL cover page omitted)"
-            parts.append(f"<!-- page {i + 1} -->\n\n{text}")
+            pages.append(text)
             textpage.close()
             page.close()
     finally:
         doc.close()
-    return "\n\n".join(parts)
+    return pages
+
+
+def pdf_to_text(data: bytes, pages: list[str] | None = None) -> str:
+    """Text of every page, with `<!-- page N -->` markers so passages can be cited by page."""
+    pages = pdf_pages(data) if pages is None else pages
+    return "\n\n".join(f"<!-- page {i} -->\n\n{text}" for i, text in enumerate(pages, 1))
 
 
 # --- JATS XML (PubMed Central, many OA publishers) --------------------------------------------
@@ -116,32 +128,46 @@ def _table(el: ET.Element) -> str:
     return "\n".join(rows)
 
 
-def _blocks(el: ET.Element, level: int, out: list[str]) -> None:
+def _figure(el: ET.Element, kind: str, out: list[str], figs: list[FigureSpec]) -> None:
+    """Caption, table, and a marker where the image goes."""
+    out.append(_caption(el, kind.capitalize()))
+    if kind == "table" and (table := next((t for t in el.iter() if _local(t.tag) == "table"), None)) is not None:
+        out.append(_table(table))
+    label = _squash("".join(t.text or "" for t in el if _local(t.tag) == "label"))
+    lab = caption_label(label) or ((kind, label) if re.fullmatch(r"S?\d+", label) else None)
+    if lab is None:
+        lab = (kind, str(1 + sum(f.kind == kind for f in figs)))
+    caption = next((c for c in el if _local(c.tag) == "caption"), None)
+    text = _squash(" ".join(_inline(p) for p in caption)) if caption is not None else ""
+    sources = [g.get(XLINK_HREF) for g in el.iter() if _local(g.tag) == "graphic" and g.get(XLINK_HREF)]
+    figs.append(FigureSpec(kind, label_of(*lab), text, sources, el.get("id")))
+    out.append(marker(len(figs) - 1))
+
+
+def _blocks(el: ET.Element, level: int, out: list[str], figs: list[FigureSpec]) -> None:
     for child in el:
         name = _local(child.tag)
         if name == "sec":
             title = next((t for t in child if _local(t.tag) == "title"), None)
             if title is not None:
                 out.append("#" * min(level, 6) + " " + _squash(_inline(title)))
-            _blocks(child, level + 1, out)
+            _blocks(child, level + 1, out, figs)
         elif name in ("title", "label"):
             continue
         elif name == "p":
             out.append(_squash(_inline(child)))
-            _blocks_nested(child, level, out)
+            _blocks_nested(child, level, out, figs)
         elif name == "fig":
-            out.append(_caption(child, "Figure"))
+            _figure(child, "figure", out, figs)
         elif name == "table-wrap":
-            out.append(_caption(child, "Table"))
-            if (table := next((t for t in child.iter() if _local(t.tag) == "table"), None)) is not None:
-                out.append(_table(table))
+            _figure(child, "table", out, figs)
         elif name == "list":
             items = [i for i in child if _local(i.tag) == "list-item"]
             out.append("\n".join("- " + _squash(_inline(i)) for i in items))
         elif name == "disp-formula":
             out.append(_inline_formula(child))
         else:
-            _blocks(child, level, out)
+            _blocks(child, level, out, figs)
 
 
 def _inline_formula(el: ET.Element) -> str:
@@ -149,11 +175,11 @@ def _inline_formula(el: ET.Element) -> str:
     return f"$${(tex.text or '').strip()}$$" if tex is not None else _squash(" ".join(el.itertext()))
 
 
-def _blocks_nested(p: ET.Element, level: int, out: list[str]) -> None:
+def _blocks_nested(p: ET.Element, level: int, out: list[str], figs: list[FigureSpec]) -> None:
     """Figures and tables are often nested inside paragraphs."""
     for child in p:
         if _local(child.tag) in ("fig", "table-wrap", "list", "disp-formula"):
-            _blocks(_wrap(child), level, out)
+            _blocks(_wrap(child), level, out, figs)
 
 
 def _wrap(el: ET.Element) -> ET.Element:
@@ -171,8 +197,8 @@ def _find(root: ET.Element, *path: str) -> ET.Element | None:
     return el
 
 
-def jats_to_text(xml: bytes) -> tuple[str, dict]:
-    """Markdown body and metadata ({title, authors}) from a JATS article."""
+def jats_to_text(xml: bytes) -> tuple[str, dict, list[FigureSpec]]:
+    """Markdown body, metadata ({title, authors}) and the figures and tables of a JATS article."""
     root = ET.fromstring(xml)
     if _local(root.tag) == "pmc-articleset":  # NCBI efetch wraps the article
         root = next((c for c in root if _local(c.tag) == "article"), root)
@@ -191,11 +217,15 @@ def jats_to_text(xml: bytes) -> tuple[str, dict]:
     meta["authors"] = authors
 
     out: list[str] = []
+    figs: list[FigureSpec] = []
     if (abstract := _find(root, "article-meta", "abstract")) is not None:
         out.append("## Abstract")
-        _blocks(abstract, 3, out)
+        _blocks(abstract, 3, out, figs)
     if (body := next((c for c in root if _local(c.tag) == "body"), None)) is not None:
-        _blocks(body, 2, out)
+        _blocks(body, 2, out, figs)
+    # Figures and tables that publishers put in <floats-group> after the body.
+    for group in (c for c in root if _local(c.tag) == "floats-group"):
+        _blocks(group, 2, out, figs)
     if (refs := _find(root, "back", "ref-list")) is not None:
         entries = []
         for ref in refs.iter():
@@ -209,4 +239,4 @@ def jats_to_text(xml: bytes) -> tuple[str, dict]:
             entries.append(f"{label + '. ' if label else '- '}{text}")
         if entries:
             out.append("## References\n\n" + "\n".join(entries))
-    return "\n\n".join(s for s in out if s.strip()), meta
+    return "\n\n".join(s for s in out if s.strip()), meta, figs

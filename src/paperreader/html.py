@@ -127,6 +127,7 @@ CHALLENGE_MARKERS = (
     "px-captcha",
     "captcha-delivery.com",  # DataDome
     "/_fs-ch-",  # proof-of-work interstitial used by e.g. PMC
+    "__identity_pow",  # PMC's newer proof-of-work page; a browser solves it by itself
 )
 
 

@@ -108,3 +108,22 @@ def test_failures_say_why_and_where_to_go(fetcher, ident):
         fetcher.get(parse(ident), force=True)
     except FetchFailed as e:
         assert e.reason and e.open_url
+
+
+def test_arxiv_html_with_figures_from_the_pdf(fetcher):
+    rec = fetcher.get(parse("arXiv:1706.03762"), force=True)  # Vaswani et al. 2017
+    text = rec.text_path.read_text()
+    assert {"html", "pdf", "figures"} <= set(rec.files)
+    assert "## 3 Model Architecture" in text and "\\mathrm{softmax}" in text
+    assert "![Figure 1: The Transformer - model architecture.]" in text
+
+
+def test_pmc_open_access_figures(fetcher):
+    rec = fetcher.get(parse("10.1162/opmi_a_00172"), force=True)  # Nencheva et al. 2024, from Europe PMC's zip
+    assert rec.source["figures"] >= 3
+
+
+def test_pdf_figures_are_cropped(fetcher):
+    rec = fetcher.get(parse("10.1111/cogs.12946"), force=True)  # Ludusan et al. 2021, the HAL PDF
+    names = sorted(p.name for p in rec.files["figures"].iterdir())
+    assert names[:2] == ["p10-figure-3.png", "p12-figure-4.png"] and "p5-figure-1.png" in names

@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+from .figures import FIGDIR
 from .models import Paper
 
 SIDECAR_VERSION = 1
@@ -153,6 +155,10 @@ class Library:
         for kind, path in rec.files.items():
             files[kind] = f"{key}{path.suffix}"
             os.replace(path, self.root / files[kind])
+        if "figures" in files:  # the text links to the images by the folder's name
+            text_path = self.root / files["text"]
+            text = text_path.read_text().replace(f"]({rec.key}.figures/", f"]({key}.figures/")
+            _atomic_write(text_path, text.encode())
         sidecar = {"paperreader": SIDECAR_VERSION, "paper": rec.paper.to_dict(), "source": rec.source, "files": files}
         _atomic_write(self.root / f"{key}.json", json.dumps(sidecar, indent=2, ensure_ascii=False).encode())
         (self.root / f"{rec.key}.json").unlink()
@@ -186,19 +192,41 @@ class Library:
             key = f"{base}-{n}"
         return key
 
-    def save(self, paper: Paper, content: bytes, fmt: str, text: str, source: dict, key: str | None = None) -> Record:
-        """Store the document (fmt "pdf" or "xml") and its extracted text, under `key` if given."""
-        self.root.mkdir(parents=True, exist_ok=True)
-        existing = self._lookup(paper)
+    def key_for(self, paper: Paper, key: str | None = None) -> str:
+        """The key `save` will store this paper under."""
         if key:
             self._check_key(key, paper)
-            if existing and existing.key != key:
-                for path in [*existing.files.values(), self.root / f"{existing.key}.json"]:
-                    path.unlink(missing_ok=True)
-        else:
-            key = existing.key if existing else self._free_key(paper)
+            return key
+        existing = self._lookup(paper)
+        return existing.key if existing else self._free_key(paper)
+
+    def save(self, paper: Paper, content: bytes, fmt: str, text: str, source: dict, key: str | None = None,
+             figures: dict[str, bytes] | None = None, attachments: dict[str, bytes] | None = None) -> Record:
+        """Store the document (fmt "pdf", "xml" or "html") and its extracted text, under `key` if given.
+
+        `figures` are image files for the paper's figures folder; the text refers to them through FIGDIR.
+        `attachments` are other formats of the document, e.g. the PDF next to arXiv's HTML.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        existing = self._lookup(paper)
+        key = self.key_for(paper, key)
+        if existing and existing.key != key:
+            for path in [*existing.files.values(), self.root / f"{existing.key}.json"]:
+                shutil.rmtree(path) if path.is_dir() else path.unlink(missing_ok=True)
         source = {**source, "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         files = {fmt: f"{key}.{fmt}", "text": f"{key}.md"}
+        for kind, data in (attachments or {}).items():
+            files[kind] = f"{key}.{kind}"
+            _atomic_write(self.root / files[kind], data)
+        figdir = self.root / f"{key}.figures"
+        if figdir.exists():
+            shutil.rmtree(figdir)
+        if figures:
+            figdir.mkdir()
+            for name, data in figures.items():
+                (figdir / name).write_bytes(data)
+            files["figures"] = figdir.name
+        text = text.replace(FIGDIR, figdir.name)
         _atomic_write(self.root / files[fmt], content)
         _atomic_write(self.root / files["text"], (header(paper, source) + text + "\n").encode())
         sidecar = {"paperreader": SIDECAR_VERSION, "paper": paper.to_dict(), "source": source, "files": files}

@@ -10,7 +10,8 @@ $ paper read 10.1038/nature14539 --pages 1-3
 
 You give it a DOI, arXiv id, PMID/PMCID, ACL Anthology id, OpenReview id, OSF id, URL or exact title.
 It finds a copy, downloads it into `~/papers`, and writes next to it a Markdown
-text version (with `<!-- page N -->` markers) and a JSON metadata sidecar.
+text version (with `<!-- page N -->` markers for PDFs), a JSON metadata sidecar, and
+a folder with an image of each figure and table, linked from the text where it appears.
 
 ## How it finds papers
 
@@ -36,10 +37,37 @@ It tries the cheapest and most polite route first and stops at the first that wo
 
 `paper resolve <id>` shows the candidates without downloading anything.
 
+## What the text looks like
+
+The best source for reading is used where there is one:
+
+- **arXiv papers** come from arXiv's HTML version (arxiv.org/html, or ar5iv for older
+  papers): real section headings, maths as LaTeX (`$\mathrm{softmax}(QK^T)$`), and tables
+  as Markdown tables. The PDF is downloaded too, for the figures.
+- **PubMed Central and bioRxiv** papers come as JATS XML: headings, tables, captions.
+- **Everything else** is text from the PDF, page by page, cleaned of cover pages and
+  watermarks. Its headings are guessed for `paper read --sections`.
+
+**Figures and tables are images**, so an agent that can see images can look at them:
+
+- From PDFs, each figure and table is cropped together with its caption. When a caption's
+  region is unclear, the whole page is rendered instead. Cropping uses PyMuPDF, an optional
+  extra (`figures`), which is licensed AGPL-3.0. Without it, pages with figures or tables
+  are rendered whole.
+- For arXiv's HTML and bioRxiv's XML, the crops come from the paper's PDF and are matched
+  by label ("Figure 3").
+- For open-access PMC articles, the original images come from Europe PMC. For PMC author
+  manuscripts they come from PMC's site, which the browser opens. Without the browser, the
+  text says where to see them.
+
+`paper read ID --figures` lists the images with their paths. `paper read` prints the text with
+absolute image paths. `paper figures --all` adds figures to papers downloaded before
+this existed, and cleans their text again.
+
 ## Install
 
 ```console
-uv tool install 'paperreader[browser] @ git+https://github.com/gchrupala/reader'
+uv tool install 'paperreader[browser,figures] @ git+https://github.com/gchrupala/reader'
 paper install-browser   # Chromium for the browser fallback; or set browser.channel = "chrome"
 paper config --init     # writes ~/.config/paperreader/config.toml
 ```
@@ -118,7 +146,9 @@ like this in your `CLAUDE.md` is enough:
 ```markdown
 To read a paper, run `paper get <DOI|arXiv id|URL|title>`; it prints the path of a
 Markdown text version, which you can read (use `paper read <id> --section Methods`
-or `--no-refs` for parts of long papers). `paper search <keywords>` finds DOIs.
+or `--no-refs` for parts of long papers). Figures and tables are images linked from
+the text; open them to look at them (`paper read <id> --figures` lists them).
+`paper search <keywords>` finds DOIs.
 If `get` fails, report its reason to me instead of looking for other copies.
 ```
 
@@ -164,7 +194,8 @@ is cleaned of HAL cover pages and "Downloaded from ..." watermarks.
 | command | |
 | --- | --- |
 | `paper get ID...` | download into the library (`--from FILE`, `--key`, `--export DIR`, `--force`, `--no-browser`, `--visible`) |
-| `paper read ID` | print the text, fetching first if needed (`--pages 1-3,7`, `--sections`, `--section NAME`, `--no-refs`) |
+| `paper read ID` | print the text, fetching first if needed (`--pages 1-3,7`, `--sections`, `--section NAME`, `--no-refs`, `--figures`) |
+| `paper figures ID...` | list a paper's figure and table images; extract them for papers stored earlier (`--all`, `--rebuild`) |
 | `paper add FILE [ID]` | register a PDF you downloaded yourself, with its metadata |
 | `paper bib ID...` | BibTeX entries |
 | `paper pending` | papers that need a person (`--retry`, `--tsv`, `--json`, `--clear`) |

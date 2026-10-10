@@ -70,7 +70,12 @@ def repository_candidates(paper: Paper) -> list[Candidate]:
     """Full text at well-known open repositories, from ids alone (no lookup needed)."""
     out = []
     if paper.arxiv:
-        out.append(Candidate(f"https://arxiv.org/pdf/{paper.arxiv}", "pdf", "arxiv", version="submittedVersion"))
+        # The HTML version has real headings, LaTeX maths and tables; figure images come from the PDF.
+        # arxiv.org has it for most papers, ar5iv (arXiv Labs) for older ones.
+        pdf = f"https://arxiv.org/pdf/{paper.arxiv}"
+        for url in (f"https://arxiv.org/html/{paper.arxiv}", f"https://ar5iv.labs.arxiv.org/html/{paper.arxiv}"):
+            out.append(Candidate(url, "html", "arxiv", version="submittedVersion", companion=pdf))
+        out.append(Candidate(pdf, "pdf", "arxiv", version="submittedVersion"))
     if paper.acl:
         out.append(Candidate(f"https://aclanthology.org/{paper.acl}.pdf", "pdf", "acl-anthology",
                              version="publishedVersion"))
@@ -113,11 +118,11 @@ def biorxiv(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]:
         pub_type="posted-content",
     )
     version = f"v{latest['version']}" if latest.get("version") else ""
+    pdf = f"https://www.{server}.org/content/{paper.doi}{version}.full.pdf"
     out = []
-    if latest.get("jatsxml"):
-        out.append(Candidate(latest["jatsxml"], "jats", server, version="submittedVersion"))
-    out.append(Candidate(f"https://www.{server}.org/content/{paper.doi}{version}.full.pdf", "pdf", server,
-                         version="submittedVersion"))
+    if latest.get("jatsxml"):  # the XML's figures are separate images; take them from the PDF
+        out.append(Candidate(latest["jatsxml"], "jats", server, version="submittedVersion", companion=pdf))
+    out.append(Candidate(pdf, "pdf", server, version="submittedVersion"))
     return out
 
 

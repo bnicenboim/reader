@@ -30,7 +30,8 @@ def test_jats_conversion():
         <abstract><p>We find things.</p></abstract>
       </article-meta></front>
       <body><sec><title>Methods</title><p>See <xref ref-type="bibr">1</xref>.</p>
-        <fig><label>Figure 1</label><caption><p>A plot.</p></caption></fig>
+        <fig id="F1"><label>Figure 1</label><caption><p>A plot.</p></caption>
+          <graphic xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="nihms-1-f0001.jpg"/></fig>
         <table-wrap><label>Table 1</label><caption><p>Numbers.</p></caption>
           <table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table></table-wrap>
       </sec></body>
@@ -38,12 +39,14 @@ def test_jats_conversion():
         <ref><label>1</label><mixed-citation>Smith J. Old work. 1999.</mixed-citation></ref>
       </ref-list></back>
     </article>"""
-    text, meta = jats_to_text(xml)
+    text, meta, figures = jats_to_text(xml)
     assert meta == {"title": "A study", "authors": ["Jane Doe"]}
     assert "## Abstract\n\nWe find things." in text
     assert "## Methods\n\nSee 1." in text
-    assert "**Figure 1.** A plot." in text
-    assert "| a | b |\n| --- | --- |\n| 1 | 2 |" in text
+    assert "**Figure 1.** A plot.\n\n<!-- figure 0 -->" in text
+    assert "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- figure 1 -->" in text
+    assert [(f.kind, f.label, f.caption, f.sources, f.ident) for f in figures] == [
+        ("figure", "Figure 1", "A plot.", ["nihms-1-f0001.jpg"], "F1"), ("table", "Table 1", "Numbers.", [], None)]
     assert "## References\n\n1. Smith J. Old work. 1999." in text
 
 
@@ -158,7 +161,8 @@ def test_pdf_text_cleaning():
 
     raw = ("it showed effects [F(2, 42) = 17.37, p = 3.2e\r\n−6\r\n, η2 = .453] and more\r\n"
            "Downloaded from http://royalsocietypublishing.org/rstb/article-pdf/doi/10.1098/x.pdf\r\nby guest\r\n"
-           "a rate of 2.5 × 10\r\n−3\r\nper second\r\n")
+           "a rate of 2.5 × 10\r\n−3\r\nper second\r\nAuthorized licensed use limited to: Tilburg University. "
+           "Downloaded on October 10,2026 at 11:48:02 UTC from IEEE Xplore. Restrictions apply. ")
     assert _clean(raw) == "it showed effects [F(2, 42) = 17.37, p = 3.2e−6, η2 = .453] and more\n" \
                           "a rate of 2.5 × 10^−3\nper second"
     assert _is_hal_cover("HAL Id: hal-03080098\nhttps://hal.science/hal-03080098v1\nSubmitted on 17 Dec 2020")

@@ -246,6 +246,33 @@ def get(app: App, papers, from_file, key, export, name, as_json, force, browser,
     sys.exit(0 if ok else 1)
 
 
+IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+
+
+def _absolute_figures(app: App, text: str) -> str:
+    """Image links relative to the library, made absolute so an agent can open them."""
+    root = app.config.library_dir.resolve()
+    return IMAGE_RE.sub(lambda m: f"![{m.group(1)}]({root / m.group(2)})", text)
+
+
+def _figure_list(text: str) -> list[tuple[int | None, str, str]]:
+    """(page, caption, path) of each image in the text."""
+    out, page = [], None
+    for line in text.split("\n"):
+        if m := sections.PAGE_RE.fullmatch(line.strip()):
+            page = int(m.group(1))
+        out += [(page, m.group(1), m.group(2)) for m in IMAGE_RE.finditer(line)]
+    return out
+
+
+def _print_figures(text: str) -> None:
+    figures = _figure_list(text)
+    for page, caption, path in figures:
+        click.echo(f"{'p' + str(page) if page else '':5} {caption}\n      {path}")
+    if not figures:
+        click.echo("no figure or table images")
+
+
 def _select_pages(text: str, pages: str) -> str:
     wanted: set[int] = set()
     for part in pages.split(","):
@@ -263,13 +290,15 @@ def _select_pages(text: str, pages: str) -> str:
 @click.option("--section", "wanted", multiple=True,
               help="Only this section, e.g. Methods (repeatable). Matches the start of a heading.")
 @click.option("--no-refs", is_flag=True, help="Leave out the reference list.")
+@click.option("--figures", "list_figures", is_flag=True, help="List the figure and table images, with their paths.")
 @with_browser_options
 @click.pass_obj
-def read(app: App, paper, pages, list_sections, wanted, no_refs, browser, visible, quiet):
+def read(app: App, paper, pages, list_sections, wanted, no_refs, list_figures, browser, visible, quiet):
     """Print a paper's text (fetching it first if needed).
 
-    Headings of PDF text are guessed (numbered lines, the usual section names), so
-    --sections shows what --section can find.
+    Figures and tables are images next to the text, linked where they appear: open them to
+    look at them. Headings of PDF text are guessed (numbered lines, the usual section names),
+    so --sections shows what --section can find.
     """
     fetcher = _fetcher(app, browser, visible, quiet=True if quiet else False)
     try:
@@ -280,9 +309,12 @@ def read(app: App, paper, pages, list_sections, wanted, no_refs, browser, visibl
         raise click.ClickException(str(e)) from e
     finally:
         fetcher.close()
-    text = rec.text_path.read_text()
+    text = _absolute_figures(app, rec.text_path.read_text())
     if pages:
         text = _select_pages(text, pages)
+    if list_figures:
+        _print_figures(text)
+        return
     if list_sections:
         for h in sections.headings(text):
             click.echo(f"{'p' + str(h.page) if h.page else '':5} {'  ' * (h.level - 1)}{h.title}")
@@ -392,6 +424,42 @@ def add(app: App, file: Path, paper, key, force):
         fetcher.close()
     app.pending.remove(rec.paper)
     click.echo(_summary(rec))
+
+
+@cli.command()
+@click.argument("papers", nargs=-1)
+@click.option("--all", "everything", is_flag=True, help="Every paper in the library stored before figures existed.")
+@click.option("--rebuild", is_flag=True, help="Extract the text and figures again, even if done before.")
+@with_browser_options
+@click.pass_obj
+def figures(app: App, papers, everything, rebuild, browser, visible, quiet):
+    """List a paper's figure and table images, extracting them first for papers stored earlier.
+
+    Extraction also cleans the text again (cover pages, watermarks). PDFs need no network;
+    figures of open-access PMC articles come from Europe PMC, and those of PMC author
+    manuscripts from PMC's site, in the browser.
+    """
+    if not papers and not everything:
+        raise click.UsageError("give papers, or --all")
+    fetcher = _fetcher(app, browser, visible, quiet)
+    try:
+        if everything:
+            for rec in app.library.all():
+                if rebuild or "figures" not in rec.source:
+                    rec = fetcher.rebuild(rec)
+                    click.echo(f"{rec.key}: {rec.source['figures']} image(s)")
+            return
+        for text in papers:
+            rec = app.library.by_key(text.strip()) or app.library.find(Paper.from_identifier(_identify(app, text)))
+            if rec is None:
+                raise click.ClickException(f"{text} is not in the library; `paper get` it first")
+            if rebuild or "figures" not in rec.source:
+                rec = fetcher.rebuild(rec)
+            if len(papers) > 1:
+                click.echo(f"== {rec.key}")
+            _print_figures(_absolute_figures(app, rec.text_path.read_text()))
+    finally:
+        fetcher.close()
 
 
 @cli.command()

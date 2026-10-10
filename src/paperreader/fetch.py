@@ -17,10 +17,13 @@ rest of the run, and for a while (`browser.check_memory_hours`) in later runs th
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
@@ -28,8 +31,10 @@ import httpx
 from . import sources
 from .browser import CHALLENGE_HEADER, SIGN_IN, Browser, BrowserUnavailable, CheckAbandoned, display_available
 from .config import Config
-from .extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
+from .extract import is_pdf, jats_to_text, pdf_info, pdf_pages, pdf_to_text
+from .figures import MARKER_RE, FigureSpec, caption_label, figure_line, image_line, pdf_figures, with_page_figures
 from .html import cloudflare_error, looks_like_challenge, parse_page
+from .html_paper import html_to_markdown, is_latexml
 from .http import CloudflareBlocked, HTTPError, PoliteClient, RateLimited, Response, TooLarge
 from .identifiers import Identifier
 from .library import Library, Record
@@ -84,9 +89,14 @@ class _AlreadyHave(Exception):
 @dataclass
 class Found:
     content: bytes
-    fmt: str  # "pdf" | "xml"
+    fmt: str  # "pdf" | "xml" | "html"
     candidate: Candidate
     url: str
+    companion: bytes | None = None  # a PDF of the paper, for figure images
+
+
+MAX_IMAGE_DOWNLOADS = 40  # figure images fetched one by one (arXiv HTML without a PDF), per paper
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/gif")
 
 
 @dataclass
@@ -157,7 +167,17 @@ class Fetcher:
         self._complete_metadata(run)
         self._arxiv_year(run, found)
         self._lookup(run, sources.crossref)  # after the arXiv year: a published article's issue year wins
+        found.companion = self._companion(run, found)
         return self._store(paper, found, key)
+
+    def rebuild(self, rec: Record) -> Record:
+        """Extract text and figures again from the stored document (after an improvement, say)."""
+        fmt = next(k for k in ("html", "xml", "pdf") if k in rec.files)
+        content = rec.files[fmt].read_bytes()
+        companion = rec.files["pdf"].read_bytes() if fmt != "pdf" and "pdf" in rec.files else None
+        cand = Candidate(rec.source.get("url") or "", fmt, rec.source.get("source") or "library",
+                         via=rec.source.get("via") or "direct", version=rec.source.get("version"))
+        return self._store(rec.paper, Found(content, fmt, cand, cand.url, companion), rec.key)
 
     def add(self, ident: Identifier, content: bytes, origin: str, key: str | None = None) -> Record:
         """Store a PDF (or JATS XML) the user downloaded by hand, with metadata as `get` collects it."""
@@ -392,6 +412,13 @@ class Fetcher:
             note("failed", f"HTTP {r.status}")
             return None
 
+        if cand.kind == "html":  # arXiv's HTML version
+            if is_latexml(r.content):
+                note("ok")
+                return Found(r.content, "html", cand, r.url)
+            note("failed", "no HTML version")
+            return None
+
         if is_pdf(r.content):
             if cand.source == "elsevier-api" and pdf_info(r.content)["pages"] <= 1:
                 note("failed", "first-page preview only: not entitled from this network")
@@ -491,16 +518,39 @@ class Fetcher:
 
     # -- results --------------------------------------------------------------------------
 
+    def _companion(self, run: _Run, found: Found) -> bytes | None:
+        """The PDF named by an XML or HTML candidate, to crop its figures and tables from."""
+        url = found.candidate.companion
+        if not url or found.fmt == "pdf" or (urlsplit(url).hostname or "") in run.cloudflare_blocked:
+            return None
+        try:
+            r = self.client.get(url, max_bytes=self.config.max_pdf_bytes)
+        except (httpx.HTTPError, HTTPError, RateLimited, QuotaExceeded, TooLarge) as e:
+            self.log(f"  {'failed':8} {'direct':7} {'figures':16} {url}  ({e})")
+            return None
+        ok = r.ok and is_pdf(r.content)
+        detail = "" if ok else f"  (HTTP {r.status})"
+        self.log(f"  {'ok' if ok else 'failed':8} {'direct':7} {'figures':16} {url}{detail}")
+        return r.content if ok else None
+
     def _store(self, paper: Paper, found: Found, key: str | None = None) -> Record:
+        files: dict[str, bytes] = {}
         if found.fmt == "pdf":
-            text = pdf_to_text(found.content)
+            pages = pdf_pages(found.content)
+            figures = pdf_figures(found.content, pages)
+            text = pdf_to_text(found.content, with_page_figures(pages, figures))
+            files = {f.name: f.png for f in figures}
             if not paper.title:
                 paper.update(title=pdf_info(found.content)["title"])
-            if len(text.replace("<!-- page", "")) < 200:
+            if len("".join(pages)) < 200:
                 text += "\n\n(No text layer found: this PDF is probably a scan.)"
         else:
-            text, meta = jats_to_text(found.content)
+            if found.fmt == "xml":
+                text, meta, specs = jats_to_text(found.content)
+            else:
+                text, meta, specs = html_to_markdown(found.content.decode("utf-8", "replace"), found.url)
             paper.update(**meta)
+            text, files = self._place_figures(paper, text, specs, found.companion)
         if not paper.title and found.url:
             paper.update(title=urlsplit(found.url).path.rsplit("/", 1)[-1] or None)
         source = {
@@ -508,8 +558,122 @@ class Fetcher:
             "url": found.url,
             "via": found.candidate.via,
             "version": found.candidate.version,
+            "figures": len(files),  # also says that figures were looked for (papers stored earlier lack it)
         }
-        return self.library.save(paper, found.content, found.fmt, text, source, key=key)
+        attachments = {"pdf": found.companion} if found.companion else None
+        return self.library.save(paper, found.content, found.fmt, text, source, key=key, figures=files,
+                                 attachments=attachments)
+
+    # -- figures of XML and HTML papers -----------------------------------------------------
+
+    def _place_figures(self, paper: Paper, text: str, specs: list[FigureSpec],
+                       companion: bytes | None) -> tuple[str, dict[str, bytes]]:
+        """Put each figure's image where its marker is.
+
+        Images come from the companion PDF (cropped, matched by label), from Europe PMC (open-access
+        PMC articles), or from the image URLs of arXiv's HTML. When there is none, the text says where
+        a person can see the figure.
+        """
+        crops = pdf_figures(companion) if companion else []
+        by_label = {c.label: c for c in reversed(crops) if c.label}
+        files: dict[str, bytes] = {}
+        used: set[str] = set()
+        pmc_images: dict[str, tuple[str, bytes]] | None = None
+        downloads = [0]
+
+        def resolve(m: re.Match) -> str:
+            nonlocal pmc_images
+            spec = specs[int(m.group(1))]
+            # HTML captions start with their label ("Figure 1: ..."), JATS ones do not.
+            alt = spec.caption if caption_label(spec.caption) else ": ".join(filter(None, (spec.label, spec.caption)))
+            if (crop := by_label.get(spec.label)) is not None:
+                used.add(crop.name)
+                files[crop.name] = crop.png
+                return image_line(alt or crop.caption, crop.name)
+            images: list[tuple[str, bytes]] = []
+            for src in spec.sources:
+                if re.match(r"https?://", src):
+                    if downloads[0] < MAX_IMAGE_DOWNLOADS and (img := self._download_image(src)):
+                        downloads[0] += 1
+                        images.append((PurePosixPath(urlsplit(src).path).name, img))
+                elif paper.pmcid:
+                    if pmc_images is None:
+                        pmc_images = self._pmc_figures(paper.pmcid) or self._pmc_page_figures(paper.pmcid, specs)
+                    if (hit := pmc_images.get(PurePosixPath(src).stem)) is not None:
+                        images.append(hit)
+            lines = []
+            for name, data in images:
+                files[name] = data
+                lines.append(image_line(alt or name, name))
+            if not lines and spec.kind == "figure" and paper.pmcid and spec.ident:
+                where = f"https://pmc.ncbi.nlm.nih.gov/articles/{paper.pmcid}/figure/{spec.ident}/"
+                lines.append(f"(The image is not open to scripts; with the browser, `paper figures --rebuild` gets it; "
+                             f"or see {where})")
+            return "\n\n".join(lines)
+
+        text = MARKER_RE.sub(resolve, text)
+        rest = [c for c in crops if c.name not in used]
+        if rest:  # crops whose label the text does not have
+            files.update({c.name: c.png for c in rest})
+            text += "\n\n## Figures and tables from the PDF\n\n" + "\n\n".join(figure_line(c) for c in rest)
+        return re.sub(r"\n{3,}", "\n\n", text), files
+
+    def _download_image(self, url: str) -> bytes | None:
+        try:
+            r = self.client.get(url, max_bytes=20 * 1024 * 1024)
+        except (httpx.HTTPError, HTTPError, RateLimited, QuotaExceeded, TooLarge):
+            return None
+        return r.content if r.ok and r.content_type in IMAGE_TYPES else None
+
+    def _pmc_page_figures(self, pmcid: str, specs: list[FigureSpec]) -> dict[str, tuple[str, bytes]]:
+        """Figure images of a PMC author manuscript: its article page, in the browser, links them on NCBI's CDN.
+
+        The page sits behind a proof-of-work check that the browser solves by itself; the CDN serves
+        the images to plain HTTP.
+        """
+        wanted = {PurePosixPath(src).stem for spec in specs for src in spec.sources if not re.match(r"https?://", src)}
+        if not (wanted and self.use_browser) or self._browser_error:
+            return {}
+        page = Candidate(f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/", "landing", "pmc-figures", via="browser")
+        try:
+            r = self._fetch(page)
+        except BrowserUnavailable as e:
+            self._browser_error = str(e)
+            return {}
+        except Exception as e:  # browser errors (timeouts, crashed pages)
+            self.log(f"  {'failed':8} {'browser':7} {'figures':16} {page.url}  ({type(e).__name__})")
+            return {}
+        links = re.findall(r'"(https://cdn\.ncbi\.nlm\.nih\.gov/pmc/blobs/[^"]+?\.(?:jpe?g|png|gif))"', r.text)
+        self.log(f"  {'ok' if links else 'failed':8} {'browser':7} {'figures':16} {page.url}")
+        out: dict[str, tuple[str, bytes]] = {}
+        for url in dict.fromkeys(links):
+            name = PurePosixPath(urlsplit(url).path).name
+            if (stem := PurePosixPath(name).stem) in wanted and stem not in out and (img := self._download_image(url)):
+                out[stem] = (name, img)
+        return out
+
+    def _pmc_figures(self, pmcid: str) -> dict[str, tuple[str, bytes]]:
+        """Figure images of an open-access PMC article, from Europe PMC's zip: file stem -> (name, data)."""
+        url = f"{sources.EUROPEPMC}/{pmcid}/supplementaryFiles?includeInlineImage=true"
+        try:
+            r = self.client.get(url, max_bytes=self.config.max_pdf_bytes)
+        except (httpx.HTTPError, HTTPError, RateLimited, QuotaExceeded, TooLarge) as e:
+            self.log(f"  {'failed':8} {'direct':7} {'figures':16} {url}  ({e})")
+            return {}
+        if not (r.ok and r.content[:2] == b"PK"):  # author manuscripts: no files
+            return {}
+        self.log(f"  {'ok':8} {'direct':7} {'figures':16} {url}")
+        out: dict[str, tuple[str, bytes]] = {}
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            for info in z.infolist():
+                name = PurePosixPath(info.filename).name
+                stem, ext = PurePosixPath(name).stem, PurePosixPath(name).suffix.lower()
+                if ext not in (".jpg", ".jpeg", ".png", ".gif"):
+                    continue
+                # Prefer the large JPEG or PNG over the GIF thumbnail.
+                if stem not in out or (ext != ".gif" and info.file_size > len(out[stem][1])):
+                    out[stem] = (name, z.read(info))
+        return out
 
     def _reason(self, run: _Run) -> tuple[str, str | None]:
         """Why nothing worked, in a few words, and the page a person should open."""
