@@ -37,7 +37,13 @@ class Pending:
 
     def add(self, paper: Paper, ident: str, reason: str, open_url: str | None, hints: list[str],
             key: str | None = None) -> None:
-        entries = [e for e in self.all() if not self._same(e, paper)]
+        """Note the paper, replacing an earlier entry for it; that entry's key stays unless `key` is given."""
+        entries, earlier = [], []
+        for e in self.all():
+            (earlier if self._same(e, paper) else entries).append(e)
+        key = key or next((e["key"] for e in earlier if e.get("key")), None)
+        if ident.startswith("url:"):  # a link is a weaker identifier than the DOI or other id given before
+            ident = next((e["id"] for e in earlier if not e["id"].startswith("url:")), ident)
         entries.append({
             "id": ident,
             "key": key,

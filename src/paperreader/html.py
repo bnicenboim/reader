@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 
 @dataclass
@@ -103,7 +105,34 @@ def parse_page(html: str, url: str) -> PageInfo:
     p.close()
     title = " ".join("".join(p._title).split())
     info.title = title or None
+    if m := DELIVER_FORM_RE.search(html):
+        info.pdf_links.append(unescape(m.group(1)))
+    if pdf := _sciencedirect_pdf(html):
+        info.pdf_links.append(pdf)
     return info
+
+
+def _sciencedirect_pdf(html: str) -> str | None:
+    """ScienceDirect pages have no citation_pdf_url; the "View PDF" link is built from the page's data.
+
+    `"pdfDownload":{"urlMetadata":{"queryParams":{"md5":..,"pid":..},"pii":..,"pdfExtension":"/pdfft",
+    "path":"science/article/pii"}}` gives /science/article/pii/<pii>/pdfft?md5=..&pid=..
+    """
+    i = html.find('"pdfDownload":')
+    if i == -1:
+        return None
+    try:
+        data, _ = json.JSONDecoder().raw_decode(html, i + len('"pdfDownload":'))
+        meta = data["urlMetadata"]
+        return f"/{meta['path']}/{meta['pii']}{meta['pdfExtension']}?{urlencode(meta['queryParams'])}"
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+# Annual Reviews (and other sites on the same platform, pub2web) offer the PDF only through a form in the
+# page body, with no citation_pdf_url. A GET of the form's action returns the PDF too (10 October 2026).
+DELIVER_FORM_RE = re.compile(r"""<form\b[^>]*\baction=["'](/deliver/fulltext/[^"']+?\.pdf\?[^"']*mimeType=pdf[^"']*)""",
+                             re.IGNORECASE)
 
 
 CHALLENGE_TITLES = (
@@ -118,6 +147,7 @@ CHALLENGE_TITLES = (
     "bot verification",
     "one more step",
     "preparing your download",
+    "human verification",  # AWS WAF's CAPTCHA (HTTP 405), e.g. dspace.mit.edu
 )
 
 CHALLENGE_MARKERS = (
@@ -135,6 +165,19 @@ def cloudflare_error(html: str) -> str | None:
     """The code of a Cloudflare error page (1015: rate-limit ban, 1020: firewall rule), if this is one."""
     m = re.search(r'class="cf-error-code">\s*(\d{4})|error code: (\d{4})', html[:50_000], re.IGNORECASE)
     return (m.group(1) or m.group(2)) if m else None
+
+
+# Pages that refuse headless Chromium but open in a visible window: ScienceDirect's (also through a proxy)
+# names the HeadlessChrome user agent. IEEE Xplore answers headless Chromium with HTTP 418 instead.
+HEADLESS_REFUSALS = ("there was a problem providing the content you requested",)
+
+
+def refuses_headless(status: int, html: str) -> bool:
+    """Is this a site's answer to headless Chromium, which a visible window would not get?"""
+    if status == 418:
+        return True
+    # The whole page: ScienceDirect's message comes after some 770 kB of inline styles.
+    return status == 403 and any(m in html.lower() for m in HEADLESS_REFUSALS)
 
 
 def looks_like_challenge(html: str, title: str | None = None) -> bool:

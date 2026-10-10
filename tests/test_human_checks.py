@@ -7,7 +7,15 @@ import pytest
 from conftest import make_pdf
 
 from paperreader import fetch as fetch_mod
-from paperreader.browser import CHALLENGE_HEADER, SIGN_IN, CheckAbandoned, PersonWait
+from paperreader.browser import (
+    CHALLENGE_HEADER,
+    SIGN_IN,
+    Browser,
+    BrowserUnavailable,
+    CheckAbandoned,
+    PersonWait,
+    _launch_args,
+)
 from paperreader.fetch import Fetcher, FetchFailed
 from paperreader.http import Response
 from paperreader.identifiers import parse
@@ -90,13 +98,14 @@ def test_later_runs_skip_the_site_unless_rechecking_and_a_passed_check_clears_it
     with pytest.raises(FetchFailed):
         setup(FakeBrowser()).get(parse(DOI))
 
-    # The next process opens no window: the site's pages are skipped or fail at once.
+    # The next process loads neither page: not Science's, nor doi.org's, which led there in the browser (#7).
     browser = FakeBrowser()
     with pytest.raises(FetchFailed) as e:
         setup(browser).get(parse(DOI))
-    assert browser.asked == [] and all(not visible for _, visible, _ in browser.fetched)
-    assert ("skipped", "human check at www.science.org not completed earlier (--visible tries again)") in {
-        (a.outcome, a.detail) for a in e.value.attempts}
+    assert browser.fetched == []
+    assert [(a.url, a.detail) for a in e.value.attempts if a.via == "browser"] == [
+        (SCIENCE_PDF, "human check at www.science.org not completed earlier (--visible tries again)"),
+        (DOI_URL, "human check at science.org not completed earlier (--visible tries again)")]
     assert e.value.reason == "human check at www.science.org"
 
     # `paper pending --retry` asks again; the person passes the check, which clears the mark.
@@ -104,6 +113,21 @@ def test_later_runs_skip_the_site_unless_rechecking_and_a_passed_check_clears_it
     rec = setup(browser, recheck=True).get(parse(DOI))
     assert browser.asked == ["www.science.org"] and rec.source["via"] == "browser"
     assert client.limiter.unfinished_check("science.org", config.browser_check_memory) is None
+    assert client.limiter.check_url_leads_to(DOI_URL, config.browser_check_memory) is None
+
+
+def test_a_page_that_redirects_to_a_site_with_an_unfinished_check_is_not_loaded(setup, router):
+    # Plain HTTP shows where doi.org leads, so the browser skips it in the first run already (#7).
+    landing = f"https://www.science.org/doi/{DOI}"
+    router.add(DOI_URL, status=302, headers={"location": landing})
+    router.add(landing, status=403)
+    for run in (1, 2):
+        browser = FakeBrowser()
+        with pytest.raises(FetchFailed) as e:
+            setup(browser).get(parse(DOI))
+        assert [u for u, _, _ in browser.fetched] == ([SCIENCE_PDF, SCIENCE_PDF] if run == 1 else [])
+        assert [a.detail for a in e.value.attempts if a.url == DOI_URL and a.via == "browser"] == [
+            "human check at www.science.org not completed" + (" earlier (--visible tries again)" if run == 2 else "")]
 
 
 def test_explicit_visible_asks_again(setup):
@@ -179,3 +203,73 @@ def test_an_unfinished_sign_in_is_asked_once_per_run_and_not_remembered(setup, c
         assert e.value.reason == "sign-in needed at the library proxy"
     assert browser.asked.count("proxy.example.edu") == 1  # not for each proxy URL, nor for the second paper
     assert client.limiter.unfinished_check("proxy.example.edu", config.browser_check_memory) is None
+
+
+def test_the_browser_does_not_announce_automation(config):
+    # The headless browser, the visible window for a check and `paper login` all launch with these (#9).
+    for executable in (None, "/usr/bin/chromium"):
+        config.browser_executable = executable
+        args = _launch_args(config)
+        assert args["ignore_default_args"] == ["--enable-automation"]
+        assert args["args"] == ["--disable-blink-features=AutomationControlled"]
+
+
+def test_a_page_in_the_real_browser_sees_no_webdriver(config, client):
+    """With Playwright's Chromium, if installed; the page is local, so nothing goes over the network."""
+    pytest.importorskip("playwright")
+    browser = Browser(config, client.limiter)
+    try:
+        browser._start()
+    except BrowserUnavailable:
+        pytest.skip("no browser installed (paper install-browser)")
+    try:
+        page = browser._ctx.new_page()
+        page.set_content("<p>a local page</p>")
+        assert page.evaluate("navigator.webdriver") is False
+    finally:
+        browser.close()
+
+
+def test_a_hung_browser_is_ended_and_the_next_page_starts_a_new_one(config, client, monkeypatch):
+    """A Playwright call that never returns (seen twice on 10 October 2026) ends in BrowserHung, not a hang."""
+    pytest.importorskip("playwright")
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from paperreader import browser as browser_mod
+
+    class Page(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<title>ok</title><p>a local page</p>")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/"
+    config.timeout = 1
+    monkeypatch.setattr(browser_mod, "HANG_MARGIN", 1.0)  # deadline: 2 * 1 + 1 s
+    snapshot = browser_mod._snapshot
+    monkeypatch.setattr(browser_mod, "_snapshot", lambda page: page.wait_for_timeout(600_000))
+    browser = Browser(config, client.limiter)
+    try:
+        try:
+            browser._start()
+        except BrowserUnavailable:
+            pytest.skip("no browser installed (paper install-browser)")
+        if browser._pid is None:
+            pytest.skip("no profile lock to find the browser process (Windows)")
+        start = time.monotonic()
+        with pytest.raises(browser_mod.BrowserHung):
+            browser.fetch(url)
+        assert time.monotonic() - start < 10
+        monkeypatch.setattr(browser_mod, "_snapshot", snapshot)
+        assert b"a local page" in browser.fetch(url).content
+    finally:
+        browser.close()
+        server.shutdown()

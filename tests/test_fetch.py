@@ -157,6 +157,29 @@ def test_ieee_pdf_is_found_by_article_number(config, client, router):
     assert rec.source["url"] == "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=123"
 
 
+def test_annual_reviews_pdf_is_found_in_its_download_form(config, client, router):
+    page = "https://www.annualreviews.org/content/journals/10.1146/annurev-x"
+    pdf = "https://www.annualreviews.org/deliver/fulltext/x/2/1/annurev-x.pdf?itemId=%2Fcontent&mimeType=pdf"
+    router.add("https://doi.org/10.1146/annurev-x", status=302, headers={"location": page})
+    router.add(page, headers={"content-type": "text/html"},
+               content=b'<html><head><title>A review</title></head><body><form method="POST" '
+                       b'action="/deliver/fulltext/x/2/1/annurev-x.pdf?itemId=%2Fcontent&amp;mimeType=pdf"></form>')
+    router.add(pdf, headers={"content-type": "application/pdf"}, content=PDF)
+    rec = fetcher(config, client).get(parse("10.1146/annurev-x"))
+    assert rec.source["url"] == pdf
+
+
+def test_a_human_check_with_status_405_is_left_for_the_browser(config, client, router):
+    # AWS WAF's CAPTCHA, as dspace.mit.edu serves it to scripts.
+    router.add(OPENALEX, json_body=openalex_work(locations=[{"is_oa": True, "pdf_url": "https://dspace.example/x.pdf"}]))
+    router.add("https://dspace.example/x.pdf", status=405, headers={"content-type": "text/html; charset=UTF-8"},
+               content=b"<!DOCTYPE html><html><head><title>Human Verification</title></head></html>")
+    with pytest.raises(FetchFailed) as e:
+        fetcher(config, client).get(parse("10.1038/nature14539"))
+    assert ("https://dspace.example/x.pdf", "blocked") in {(a.url, a.outcome) for a in e.value.attempts}
+    assert e.value.reason == "dspace.example refused plain HTTP (needs the browser)"
+
+
 def test_pmc_full_text_xml(config, client, router):
     router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/search", json_body={"resultList": {"result": [{
         "title": "Sharing data.", "pubYear": "2007", "pmid": "1", "pmcid": "PMC9", "doi": "10.1371/x",

@@ -119,8 +119,12 @@ The tool deals with them like this:
 - Cloudflare's error 1015 (a rate-limit ban, often given to scripts on the first request)
   is reported as "blocked by Cloudflare": waiting does not help, so it is not retried, and
   the URL is left for the browser.
-- It does not solve CAPTCHAs automatically (yet), spoof browser fingerprints or use
-  shadow libraries.
+- The browser leaves out the switches that tell sites it is automated (`navigator.webdriver`,
+  the "controlled by automated test software" bar), since Cloudflare's checks did not pass
+  while it showed them, even when completed by hand. It does not disguise itself further:
+  headless, its user agent says HeadlessChrome. If a site's check still does not pass, try
+  `browser.channel = "chrome"` (your installed Chrome) or `browser.cdp_url` (your everyday Chrome).
+- It does not solve CAPTCHAs automatically (yet) or use shadow libraries.
 
 ## Politeness
 

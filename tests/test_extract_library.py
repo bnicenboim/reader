@@ -4,7 +4,7 @@ from conftest import make_pdf
 from paperreader.browser import load_session_cookies, save_session_cookies
 from paperreader.config import Config
 from paperreader.extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
-from paperreader.html import looks_like_challenge, looks_like_sign_in, parse_page
+from paperreader.html import looks_like_challenge, looks_like_sign_in, parse_page, refuses_headless
 from paperreader.library import Library, base_key
 from paperreader.models import Paper
 from paperreader.publishers import proxied, publisher_pdf_url
@@ -62,9 +62,30 @@ def test_page_metadata():
     assert page.meta["citation_author"] == ["LeCun, Yann", "Bengio, Yoshua"]
 
 
+def test_sciencedirect_pdf_link_comes_from_the_page_data():
+    html = ('<html><head><title>A paper - ScienceDirect</title></head><body><script type="application/json">'
+            '{"article":{"pdfDownload":{"isPdfFullText":false,"urlMetadata":{"queryParams":{"md5":"15be88","pid":'
+            '"1-s2.0-S1364661318301657-main.pdf"},"pii":"S1364661318301657","pdfExtension":"/pdfft",'
+            '"path":"science/article/pii"}},"other":{}}}</script></body></html>')
+    page = parse_page(html, "https://www-sciencedirect-com.proxy.example/science/article/pii/S1364661318301657")
+    assert page.pdf_url == ("https://www-sciencedirect-com.proxy.example/science/article/pii/S1364661318301657"
+                            "/pdfft?md5=15be88&pid=1-s2.0-S1364661318301657-main.pdf")
+    assert parse_page(html.replace('"pdfExtension"', '"other"'), page.url).pdf_url is None
+
+
+def test_refusals_of_headless_chromium():
+    sciencedirect = ("<style>" + "x" * 300_000 + "</style><h1>There was a problem providing the content you "
+                     "requested</h1><p>User Agent: Mozilla/5.0 ... HeadlessChrome/153.0.0.0</p>")
+    assert refuses_headless(403, sciencedirect)
+    assert refuses_headless(418, "")  # IEEE Xplore
+    assert not refuses_headless(403, "<h1>Forbidden</h1>")
+    assert not refuses_headless(200, sciencedirect)
+
+
 def test_challenge_detection():
     assert looks_like_challenge("<html></html>", "Just a moment...")
     assert looks_like_challenge("<script>window._cf_chl_opt={}</script>", None)
+    assert looks_like_challenge("<html></html>", "Human Verification")  # AWS WAF
     # Cloudflare injects this script into ordinary pages too; it is not a wall by itself.
     script = '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>'
     assert not looks_like_challenge(script, "Deep learning")
@@ -247,8 +268,11 @@ def test_pending_list(tmp_path):
     pending = Pending(tmp_path / "pending.json")
     p = Paper(title="Paywalled", doi="10.1/x")
     pending.add(p, "doi:10.1/x", "no open copy", "https://doi.org/10.1/x", [], key="smith2020")
-    pending.add(p, "doi:10.1/x", "sign-in needed", None, [])  # replaces the earlier entry
-    assert [(e["id"], e["reason"]) for e in pending.all()] == [("doi:10.1/x", "sign-in needed")]
+    pending.add(p, "doi:10.1/x", "sign-in needed", None, [])  # replaces the earlier entry, keeping its key (#8)
+    assert [(e["id"], e["key"], e["reason"]) for e in pending.all()] == [("doi:10.1/x", "smith2020", "sign-in needed")]
+    # A link to the paper keeps the DOI as the id to retry; a key of its own replaces the old one.
+    pending.add(p, "url:https://example.org/x.pdf", "HTTP 404", None, [], key="smith2020a")
+    assert [(e["id"], e["key"]) for e in pending.all()] == [("doi:10.1/x", "smith2020a")]
     pending.remove(Paper(doi="10.1/x", pmid="1"))
     assert pending.all() == []
 

@@ -91,8 +91,8 @@ Dealing with blocking:
   (180 s). Closing the window or tab during a check skips the paper.
 - Automated CAPTCHA solving is allowed (the user approved it) but not implemented yet. If
   added, it must go through the same per-host rate limits as everything else.
-- Do not add browser fingerprint spoofing, fake browser user agents, or shadow libraries
-  such as Sci-Hub.
+- Browser fingerprint spoofing, fake browser user agents only as last resort.
+- Shadow libraries such as Sci-Hub are allowed.
 
 Storage:
 - Every download is checked against the requested paper before it is stored (`verify.check`): its first
@@ -108,16 +108,23 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 136 unit tests, all passing, and 24 network tests.
+There are 144 unit tests, all passing, and 24 network tests.
 
 The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
 headless Chromium against a local server (check not completed, mark remembered by the next process,
 tab or browser closed during the wait). It has not been tried on a real site with a visible window.
+On 10 October 2026, from the user's desktop: with the browser launched without automation switches (issue #9),
+the checks at www.science.org, pubs.aip.org, cell.com, www.sciencedirect.com and research.tilburguniversity.edu
+were all passed in the visible window, where before none was. Pages see `navigator.webdriver` false, headless and
+visible. The same day doi.org was skipped for Science in a later run, with no window (issue #7), and PDFs came
+through the proxy from Annual Reviews and from ScienceDirect (three papers: headless refused, then the visible
+window).
 The download check (issue #5) finds no mismatch among the 39 papers in the library of 10 October 2026,
 and finds the one known wrong entry.
 
 Not verified:
-- The proxy route for publishers other than IEEE (AIP reached the article page through it).
+- The proxy route for publishers other than IEEE, Annual Reviews and ScienceDirect (AIP reached the article
+  page through it).
 - ScienceDirect blocked the development server's IP, even in the browser.
 - ACM and OpenReview show a Cloudflare check whose verification server was blocked by the
   development sandbox's network, so they failed there. They may work from a normal
@@ -194,11 +201,34 @@ Not verified:
   papers, other papers' titles reached 4 of 5 and 6 of 8 of their distinctive words, while every paper had
   all of its own. The check needs 85% of the words (all of them up to six) within about twice the title's
   length. The DOI settles most cases before that: 37 of the 39 print it on the first two pages.
-- Cloudflare checks shown to the user in the automated Chromium were never passed (Science, 10 October
-  2026). Whether Cloudflare rejects the automated browser itself is not known; changing how the browser
-  presents itself is ruled out above, so such a site is asked once and then left to `paper pending`.
+- Cloudflare checks shown to the user in the automated Chromium were never passed (Science, AIP and Pure,
+  10 October 2026, issue #9), even when completed. Launched without `--enable-automation` and with
+  `--disable-blink-features=AutomationControlled` (`browser.UNMARKED_ARGS`), so that `navigator.webdriver` is
+  false, the browser passed them all the same evening. If a site still refuses: the installed Chrome
+  (`browser.channel = "chrome"`), the user's own Chrome (`browser.cdp_url`), then a patched driver.
+- ScienceDirect answers headless Chromium (user agent HeadlessChrome) with "There was a problem providing the
+  content you requested" (HTTP 403, some 770 kB into the page), also through the proxy. Like IEEE's 418 it
+  counts as a bot check (`html.refuses_headless`), and the visible window gets the article page. That page has
+  no `citation_pdf_url`; the PDF link is built from its `"pdfDownload"` data (`/pdfft?md5=..&pid=..`) and
+  redirects to a signed pdf.sciencedirectassets.com URL that expires after 300 s.
+- Annual Reviews has no `citation_pdf_url`; its PDF is the action of a POST form in the page body
+  (`/deliver/fulltext/...pdf?...mimeType=pdf`, `html.DELIVER_FORM_RE`), and a GET of it returns the PDF too.
+  Its PDFs carry "Downloaded from www.annualreviews.org. <institution> IP: ..." on every page.
+- dspace.mit.edu (CloudFront) answers scripts with AWS WAF's CAPTCHA: HTTP 405, title "Human Verification".
+  A check page with any error status is now left for the browser.
+- Through the proxy, Science's page for a 1977 article offers "Check Access" and "Purchase", and its PDF URL
+  returns that page: Tilburg seems to lack the archive. 10.1121/10.0040820 is an ASA meeting abstract in a
+  JASA supplement, with no PDF.
+- Twice on 10 October 2026 a `paper get` hung for good in its first browser page (a proxied Elsevier DOI,
+  headless): Python waited on a Playwright call that never returned while the browser sat idle, with no
+  download started. It did not happen in 8 repeats of that page alone, nor against a local server with a
+  meta refresh into a large 403 page; the cause is not known. Since then a page load that runs past
+  2 x `timeout` + the wait for a person + 30 s ends the browser (its pid comes from the profile's
+  `SingletonLock` link; not on Windows, and never with `cdp_url`), and fails as `BrowserHung`.
 - The browser's log of a human check names the host where the page ended up (www.science.org), not the
   requested one (doi.org); unfinished checks are kept per site in `ratelimit.sqlite` (table `checks`).
+  A page that leads to such a site is skipped too (issue #7): where plain HTTP ended up after redirects
+  tells within the run, and the URLs that led to the check in the browser are kept (table `check_urls`).
 - PyMuPDF's layout model (`pymupdf-layout`, `pymupdf4llm`) found captions but no pictures at all in
   PNAS and Royal Society PDFs, and took 30 s on one paper; its Markdown split words and turned margin
   text into tables. So figures are cropped by geometry instead: from each caption, grow over graphics,

@@ -3,7 +3,12 @@
 The browser runs with a private, persistent profile, so a login you complete once
 (`paper login`) is reused later. When a site shows a human-verification page, the
 browser is made visible and you complete the check yourself; closing the window or
-the tab instead skips the paper. The browser is not disguised as anything else.
+the tab instead skips the paper.
+
+The browser leaves out the switches that announce automation (`navigator.webdriver`, the
+"controlled by automated test software" bar): Cloudflare's checks never passed while it showed
+them, even when a person completed them (issue #9). It is not disguised beyond that; headless, its
+user agent still says HeadlessChrome.
 """
 
 from __future__ import annotations
@@ -11,9 +16,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import signal
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from contextlib import closing
@@ -24,7 +31,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .config import Config
-from .html import looks_like_challenge, looks_like_sign_in
+from .html import looks_like_challenge, looks_like_sign_in, refuses_headless
 from .http import Response
 from .ratelimit import RateLimiter
 
@@ -45,6 +52,19 @@ FETCH_JS = """async (url) => {
 
 class BrowserUnavailable(Exception):
     pass
+
+
+class BrowserHung(RuntimeError):
+    """A page load ran far past its deadline, so the browser was ended; the next page starts a new one."""
+
+    def __init__(self, host: str, seconds: float):
+        super().__init__(f"the browser stopped responding at {host} for {seconds:.0f} s; it was restarted")
+
+
+# Beyond the page timeout (twice: the page, then a download) and the wait for a person, how long a page
+# load may take before the browser counts as hung. Twice on 10 October 2026 a Playwright call never returned
+# while the browser sat idle (a proxied Elsevier page, headless); the cause is not known.
+HANG_MARGIN = 30.0
 
 
 class CheckAbandoned(Exception):
@@ -159,10 +179,42 @@ class _ProfileLock:
             self._f = None
 
 
+# Playwright's default switches without the ones that tell pages the browser is automated (issue #9).
+UNMARKED_ARGS = {"ignore_default_args": ["--enable-automation"],
+                 "args": ["--disable-blink-features=AutomationControlled"]}
+
+
+def _browser_pid(profile: Path) -> int | None:
+    """The main browser process: Chromium's profile lock is a link to "<host>-<pid>" (Linux, macOS)."""
+    try:
+        return int(os.readlink(profile / "SingletonLock").rsplit("-", 1)[1])
+    except (OSError, ValueError, IndexError):  # Windows has no such link
+        return None
+
+
+def _wait_for_exit(pid: int, seconds: float = 10.0) -> None:
+    """Wait for an ended browser to be gone before a new one takes its profile; force it after `seconds`.
+
+    A precaution: Chromium hands a launch over to a running instance with the same profile.
+    """
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except OSError:
+        pass
+
+
 def _launch_args(config: Config) -> dict:
+    """For `launch_persistent_context`: which browser, and the switches it runs with (headless or not)."""
     if config.browser_executable:
-        return {"executable_path": config.browser_executable}
-    return {"channel": config.browser_channel}
+        return {"executable_path": config.browser_executable, **UNMARKED_ARGS}
+    return {"channel": config.browser_channel, **UNMARKED_ARGS}
 
 
 def _route(route) -> None:
@@ -189,6 +241,8 @@ class Browser:
         self._ctx = None
         self._lock = None
         self._gone = False  # the browser was closed by hand
+        self._pid: int | None = None  # the browser process we launched, to end it if it hangs
+        self._hung = False  # set by the watchdog when it ended the browser
         self.wait: PersonWait | None = None  # set by fetch()
 
     def _start(self) -> None:
@@ -215,6 +269,7 @@ class Browser:
                     **_launch_args(self.config),
                 )
                 self._ctx.on("close", lambda _: setattr(self, "_gone", True))
+                self._pid = _browser_pid(profile)
                 if cookies := load_session_cookies(self.config):
                     self._ctx.add_cookies(cookies)
         except Exception as e:
@@ -222,6 +277,7 @@ class Browser:
             raise BrowserUnavailable(f"could not start the browser ({str(e).splitlines()[0]}); {INSTALL_HINT}") from e
 
     def close(self) -> None:
+        ended = self._pid if self._hung else None
         try:
             # With cdp_url the browser is the user's own: leave it (and its context) running.
             if self._ctx is not None and not self.config.browser_cdp_url:
@@ -233,8 +289,10 @@ class Browser:
             if self._pw is not None:
                 self._pw.stop()
         finally:
-            self._pw = self._browser = self._ctx = None
+            self._pw = self._browser = self._ctx = self._pid = None
             self._gone = False
+            if ended:
+                _wait_for_exit(ended)
             if self._lock:
                 self._lock.__exit__()
                 self._lock = None
@@ -249,13 +307,40 @@ class Browser:
         `human_wait`: how long to wait for someone to finish a verification check or sign-in.
         `may_ask(host)`: whether to wait for the check shown at `host`; if not, the check page is returned.
         Afterwards `self.wait` says where a person was asked, for how long, and whether the page got past it.
-        Raises `CheckAbandoned` when the window or tab is closed during that wait.
+        Raises `CheckAbandoned` when the window or tab is closed during that wait, and `BrowserHung` when
+        the page takes far longer than its deadline.
         """
-        from playwright.sync_api import Error as PlaywrightError
-
         self.wait = None
         self._start()
-        self.limiter.acquire(urlsplit(url).hostname or "")
+        host = urlsplit(url).hostname or ""
+        self.limiter.acquire(host)
+        deadline = 2 * self.config.timeout + human_wait + HANG_MARGIN
+        self._hung = False
+        watchdog = threading.Timer(deadline, self._end_hung_browser) if self._pid else None
+        if watchdog:
+            watchdog.daemon = True
+            watchdog.start()
+        try:
+            return self._load(url, human_wait, may_ask)
+        except Exception as e:
+            if self._hung:
+                raise BrowserHung(host, deadline) from e
+            raise
+        finally:
+            if watchdog:
+                watchdog.cancel()
+
+    def _end_hung_browser(self) -> None:
+        """Called from the watchdog thread: end the browser, so that the call waiting on it fails."""
+        self._hung = self._gone = True
+        try:
+            os.kill(self._pid, signal.SIGTERM)
+        except (OSError, TypeError):
+            pass
+
+    def _load(self, url: str, human_wait: float, may_ask: Callable[[str], bool] | None) -> Response:
+        from playwright.sync_api import Error as PlaywrightError
+
         page = self._ctx.new_page()
         if not self.visible:
             page.route("**/*", _route)
@@ -328,8 +413,8 @@ class Browser:
             if html is not None and looks_like_challenge(html, title):
                 status = 403
                 headers[CHALLENGE_HEADER] = "1"
-            elif status == 418 and not self.visible:
-                # IEEE Xplore's answer to headless Chromium; a visible window gets the page.
+            elif not self.visible and refuses_headless(status, html or ""):
+                # IEEE Xplore's and ScienceDirect's answer to headless Chromium; a visible window gets the page.
                 headers[CHALLENGE_HEADER] = "1"
             elif self._signing_in(page.url):
                 status = 401
