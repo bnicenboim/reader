@@ -3,7 +3,12 @@
 The browser runs with a private, persistent profile, so a login you complete once
 (`paper login`) is reused later. When a site shows a human-verification page, the
 browser is made visible and you complete the check yourself; closing the window or
-the tab instead skips the paper. The browser is not disguised as anything else.
+the tab instead skips the paper.
+
+The browser leaves out the switches that announce automation (`navigator.webdriver`, the
+"controlled by automated test software" bar): Cloudflare's checks never passed while it showed
+them, even when a person completed them (issue #9). It is not disguised beyond that; headless, its
+user agent still says HeadlessChrome.
 """
 
 from __future__ import annotations
@@ -159,10 +164,16 @@ class _ProfileLock:
             self._f = None
 
 
+# Playwright's default switches without the ones that tell pages the browser is automated (issue #9).
+UNMARKED_ARGS = {"ignore_default_args": ["--enable-automation"],
+                 "args": ["--disable-blink-features=AutomationControlled"]}
+
+
 def _launch_args(config: Config) -> dict:
+    """For `launch_persistent_context`: which browser, and the switches it runs with (headless or not)."""
     if config.browser_executable:
-        return {"executable_path": config.browser_executable}
-    return {"channel": config.browser_channel}
+        return {"executable_path": config.browser_executable, **UNMARKED_ARGS}
+    return {"channel": config.browser_channel, **UNMARKED_ARGS}
 
 
 def _route(route) -> None:

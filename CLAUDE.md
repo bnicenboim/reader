@@ -108,11 +108,14 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 136 unit tests, all passing, and 24 network tests.
+There are 139 unit tests, all passing, and 24 network tests.
 
 The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
 headless Chromium against a local server (check not completed, mark remembered by the next process,
 tab or browser closed during the wait). It has not been tried on a real site with a visible window.
+Skipping pages that redirect to a site with an unfinished check (issue #7) was tested with the fake browser only.
+The browser launch without automation switches (issue #9) was checked with headless Chromium on a local page
+(`navigator.webdriver` is false); not yet with a visible window or on a real Cloudflare check.
 The download check (issue #5) finds no mismatch among the 39 papers in the library of 10 October 2026,
 and finds the one known wrong entry.
 
@@ -194,9 +197,13 @@ Not verified:
   papers, other papers' titles reached 4 of 5 and 6 of 8 of their distinctive words, while every paper had
   all of its own. The check needs 85% of the words (all of them up to six) within about twice the title's
   length. The DOI settles most cases before that: 37 of the 39 print it on the first two pages.
-- Cloudflare checks shown to the user in the automated Chromium were never passed (Science, 10 October
-  2026). Whether Cloudflare rejects the automated browser itself is not known; changing how the browser
-  presents itself is ruled out above, so such a site is asked once and then left to `paper pending`.
+- Cloudflare checks shown to the user in the automated Chromium were never passed (Science, AIP and Pure,
+  10 October 2026, issue #9), even when completed. The browser now launches without
+  `--enable-automation` and with `--disable-blink-features=AutomationControlled` (`browser.UNMARKED_ARGS`),
+  so pages see `navigator.webdriver` false. Whether checks then pass is not known yet; the next things to
+  try, in #9's order: the installed Chrome (`browser.channel = "chrome"`), the user's own Chrome
+  (`browser.cdp_url`), then a patched driver or a stealth layer. Until then such a site is asked once and
+  left to `paper pending`.
 - The browser's log of a human check names the host where the page ended up (www.science.org), not the
   requested one (doi.org); unfinished checks are kept per site in `ratelimit.sqlite` (table `checks`).
   A page that leads to such a site is skipped too (issue #7): where plain HTTP ended up after redirects

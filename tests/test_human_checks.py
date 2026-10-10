@@ -7,7 +7,15 @@ import pytest
 from conftest import make_pdf
 
 from paperreader import fetch as fetch_mod
-from paperreader.browser import CHALLENGE_HEADER, SIGN_IN, CheckAbandoned, PersonWait
+from paperreader.browser import (
+    CHALLENGE_HEADER,
+    SIGN_IN,
+    Browser,
+    BrowserUnavailable,
+    CheckAbandoned,
+    PersonWait,
+    _launch_args,
+)
 from paperreader.fetch import Fetcher, FetchFailed
 from paperreader.http import Response
 from paperreader.identifiers import parse
@@ -195,3 +203,28 @@ def test_an_unfinished_sign_in_is_asked_once_per_run_and_not_remembered(setup, c
         assert e.value.reason == "sign-in needed at the library proxy"
     assert browser.asked.count("proxy.example.edu") == 1  # not for each proxy URL, nor for the second paper
     assert client.limiter.unfinished_check("proxy.example.edu", config.browser_check_memory) is None
+
+
+def test_the_browser_does_not_announce_automation(config):
+    # The headless browser, the visible window for a check and `paper login` all launch with these (#9).
+    for executable in (None, "/usr/bin/chromium"):
+        config.browser_executable = executable
+        args = _launch_args(config)
+        assert args["ignore_default_args"] == ["--enable-automation"]
+        assert args["args"] == ["--disable-blink-features=AutomationControlled"]
+
+
+def test_a_page_in_the_real_browser_sees_no_webdriver(config, client):
+    """With Playwright's Chromium, if installed; the page is local, so nothing goes over the network."""
+    pytest.importorskip("playwright")
+    browser = Browser(config, client.limiter)
+    try:
+        browser._start()
+    except BrowserUnavailable:
+        pytest.skip("no browser installed (paper install-browser)")
+    try:
+        page = browser._ctx.new_page()
+        page.set_content("<p>a local page</p>")
+        assert page.evaluate("navigator.webdriver") is False
+    finally:
+        browser.close()
