@@ -199,6 +199,8 @@ Not verified:
   presents itself is ruled out above, so such a site is asked once and then left to `paper pending`.
 - The browser's log of a human check names the host where the page ended up (www.science.org), not the
   requested one (doi.org); unfinished checks are kept per site in `ratelimit.sqlite` (table `checks`).
+  A page that leads to such a site is skipped too (issue #7): where plain HTTP ended up after redirects
+  tells within the run, and the URLs that led to the check in the browser are kept (table `check_urls`).
 - PyMuPDF's layout model (`pymupdf-layout`, `pymupdf4llm`) found captions but no pictures at all in
   PNAS and Royal Society PDFs, and took 30 s on one paper; its Markdown split words and turned margin
   text into tables. So figures are cropped by geometry instead: from each caption, grow over graphics,

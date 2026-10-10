@@ -4,8 +4,8 @@ An agent may run several `paper` commands at once, so the budget lives in a
 SQLite file rather than in memory. Each request reserves the next free slot for
 its host inside a write transaction, then sleeps until that slot arrives.
 
-The same file remembers hosts whose human check was shown and not completed, so that
-later processes do not open a window for them again.
+The same file remembers hosts whose human check was shown and not completed, and the URLs
+that led to those checks, so that later processes do not open a window for them again.
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ class RateLimiter:
             CREATE TABLE IF NOT EXISTS requests (host TEXT NOT NULL, at REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS requests_host_at ON requests(host, at);
             CREATE TABLE IF NOT EXISTS checks (host TEXT PRIMARY KEY, at REAL NOT NULL, url TEXT);
+            CREATE TABLE IF NOT EXISTS check_urls (url TEXT PRIMARY KEY, host TEXT NOT NULL);
             """
         )
         self._limit_for = limit_for
@@ -105,6 +106,11 @@ class RateLimiter:
         """Remember that `host` showed a human check that nobody completed, on the way to `url`."""
         self._db.execute("INSERT OR REPLACE INTO checks (host, at, url) VALUES (?, ?, ?)",
                          (host.lower(), self._clock(), url))
+        self.note_check_url(url, host)
+
+    def note_check_url(self, url: str, host: str) -> None:
+        """Remember that `url` leads to the check at `host` (after redirects), without renewing the mark."""
+        self._db.execute("INSERT OR REPLACE INTO check_urls (url, host) VALUES (?, ?)", (url, host.lower()))
 
     def unfinished_check(self, host: str, within: float) -> str | None:
         """The URL that led to a check at `host` nobody completed in the last `within` seconds, if any."""
@@ -112,12 +118,19 @@ class RateLimiter:
                                (host.lower(), self._clock() - within)).fetchone()
         return row[0] if row else None
 
+    def check_url_leads_to(self, url: str, within: float) -> str | None:
+        """The host of a check nobody completed in the last `within` seconds that `url` led to, if any."""
+        row = self._db.execute("SELECT c.host FROM check_urls u JOIN checks c ON c.host = u.host "
+                               "WHERE u.url = ? AND c.at > ?", (url, self._clock() - within)).fetchone()
+        return row[0] if row else None
+
     def clear_checks(self, host: str | None = None) -> None:
         """Forget the unfinished check at `host`, or at every host."""
-        if host is None:
-            self._db.execute("DELETE FROM checks")
-        else:
-            self._db.execute("DELETE FROM checks WHERE host = ?", (host.lower(),))
+        for table in ("checks", "check_urls"):
+            if host is None:
+                self._db.execute(f"DELETE FROM {table}")
+            else:
+                self._db.execute(f"DELETE FROM {table} WHERE host = ?", (host.lower(),))
 
     def usage(self) -> list[tuple[str, int, int]]:
         """(host, requests in the last hour, requests in the last day)."""

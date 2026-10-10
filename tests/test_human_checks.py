@@ -90,13 +90,14 @@ def test_later_runs_skip_the_site_unless_rechecking_and_a_passed_check_clears_it
     with pytest.raises(FetchFailed):
         setup(FakeBrowser()).get(parse(DOI))
 
-    # The next process opens no window: the site's pages are skipped or fail at once.
+    # The next process loads neither page: not Science's, nor doi.org's, which led there in the browser (#7).
     browser = FakeBrowser()
     with pytest.raises(FetchFailed) as e:
         setup(browser).get(parse(DOI))
-    assert browser.asked == [] and all(not visible for _, visible, _ in browser.fetched)
-    assert ("skipped", "human check at www.science.org not completed earlier (--visible tries again)") in {
-        (a.outcome, a.detail) for a in e.value.attempts}
+    assert browser.fetched == []
+    assert [(a.url, a.detail) for a in e.value.attempts if a.via == "browser"] == [
+        (SCIENCE_PDF, "human check at www.science.org not completed earlier (--visible tries again)"),
+        (DOI_URL, "human check at science.org not completed earlier (--visible tries again)")]
     assert e.value.reason == "human check at www.science.org"
 
     # `paper pending --retry` asks again; the person passes the check, which clears the mark.
@@ -104,6 +105,21 @@ def test_later_runs_skip_the_site_unless_rechecking_and_a_passed_check_clears_it
     rec = setup(browser, recheck=True).get(parse(DOI))
     assert browser.asked == ["www.science.org"] and rec.source["via"] == "browser"
     assert client.limiter.unfinished_check("science.org", config.browser_check_memory) is None
+    assert client.limiter.check_url_leads_to(DOI_URL, config.browser_check_memory) is None
+
+
+def test_a_page_that_redirects_to_a_site_with_an_unfinished_check_is_not_loaded(setup, router):
+    # Plain HTTP shows where doi.org leads, so the browser skips it in the first run already (#7).
+    landing = f"https://www.science.org/doi/{DOI}"
+    router.add(DOI_URL, status=302, headers={"location": landing})
+    router.add(landing, status=403)
+    for run in (1, 2):
+        browser = FakeBrowser()
+        with pytest.raises(FetchFailed) as e:
+            setup(browser).get(parse(DOI))
+        assert [u for u, _, _ in browser.fetched] == ([SCIENCE_PDF, SCIENCE_PDF] if run == 1 else [])
+        assert [a.detail for a in e.value.attempts if a.url == DOI_URL and a.via == "browser"] == [
+            "human check at www.science.org not completed" + (" earlier (--visible tries again)" if run == 2 else "")]
 
 
 def test_explicit_visible_asks_again(setup):

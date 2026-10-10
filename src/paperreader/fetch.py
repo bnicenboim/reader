@@ -11,8 +11,9 @@ Order of attempts:
   6. the institution's proxy, in a real browser
   7. that browser for whatever refused plain HTTP, reusing your logged-in sessions
 
-A human check that nobody completes is asked once: the site's other pages are skipped for the
-rest of the run, and for a while (`browser.check_memory_hours`) in later runs that are not --visible.
+A human check that nobody completes is asked once: the site's other pages, and pages elsewhere that
+lead there (doi.org, the proxy), are skipped for the rest of the run, and for a while
+(`browser.check_memory_hours`) in later runs that are not --visible.
 """
 
 from __future__ import annotations
@@ -109,6 +110,7 @@ class _Run:
     cloudflare_blocked: set[str] = field(default_factory=set)  # hosts that answered with Cloudflare's error 1015
     looked_up: set[str] = field(default_factory=set)  # preprint server lookups done
     unfinished: dict[str, str] = field(default_factory=dict)  # site -> the check there nobody completed
+    landed: dict[str, str] = field(default_factory=dict)  # URL queued for the browser -> host plain HTTP ended at
     waited: float = 0.0  # seconds spent waiting for a person
     abandoned: bool = False  # the window was closed during a check: skip the paper
 
@@ -306,10 +308,23 @@ class Fetcher:
         """One page in the browser. A person is asked about a check only where they have not given up on it."""
         wait = self._wait_left(run) if self.visible else 0.0
         try:
-            return self._browser.fetch(url, human_wait=wait, may_ask=lambda h: not self._unfinished_check(run, h))
+            r = self._browser.fetch(url, human_wait=wait, may_ask=lambda h: not self._unfinished_check(run, h))
         finally:
             if self._browser.wait:
                 self._after_wait(run, url)
+        if not self._browser.wait:
+            self._note_redirect_to_check(run, url, r)
+        return r
+
+    def _note_redirect_to_check(self, run: _Run, url: str, r: Response) -> None:
+        """A page that led to another site's check, which nobody completed: skip it from now on."""
+        if r.headers.get(CHALLENGE_HEADER) in (None, SIGN_IN):
+            return
+        page_host = urlsplit(r.url).hostname or ""
+        site = _site(urlsplit(url).hostname or "")
+        if _site(page_host) != site and (why := self._unfinished_check(run, page_host)):
+            run.unfinished.setdefault(site, why)  # this paper's other pages there (doi.org, the proxy)
+            self.client.limiter.note_check_url(url, _site(page_host))  # this page, in later runs
 
     def _after_wait(self, run: _Run, url: str) -> None:
         """Remember whether the person got past the check, so a check nobody completes is not shown again."""
@@ -339,6 +354,14 @@ class Fetcher:
             return f"human check at {host} not completed earlier (--visible tries again)"
         return None
 
+    def _leads_to_unfinished_check(self, run: _Run, url: str) -> str | None:
+        """Why not to load `url` in the browser: it ends at a check nobody completed, after redirects."""
+        if (landed := run.landed.get(url)) and (why := self._unfinished_check(run, landed)):
+            return why
+        if not self.recheck and (site := self.client.limiter.check_url_leads_to(url, self.config.browser_check_memory)):
+            return f"human check at {site} not completed earlier (--visible tries again)"
+        return None
+
     def _attempt(self, run: _Run, cand: Candidate, depth: int = 0) -> Found | None:
         if (cand.via, cand.url) in run.seen:
             return None
@@ -356,7 +379,8 @@ class Fetcher:
             note("skipped", f"blocked by Cloudflare at {host}")
             self._queue_for_browser(run, cand)
             return None
-        if cand.via == "browser" and (why := self._unfinished_check(run, host)):
+        if cand.via == "browser" and (
+                why := self._unfinished_check(run, host) or self._leads_to_unfinished_check(run, cand.url)):
             note("skipped", why)
             return None
         try:
@@ -369,7 +393,7 @@ class Fetcher:
             # Plain HTTP will not get through for a while; a browser sometimes does.
             run.cloudflare_blocked.add(e.host)
             note("blocked", str(e))
-            self._queue_for_browser(run, cand)
+            self._queue_for_browser(run, cand, e.host)
             return None
         except RateLimited as e:
             run.exhausted.add(e.host)
@@ -406,7 +430,7 @@ class Fetcher:
             else:
                 detail = f"HTTP {r.status}"
             note("blocked", detail)
-            self._queue_for_browser(run, cand)
+            self._queue_for_browser(run, cand, page_host)
             return None
         if r.status >= 400:
             note("failed", f"HTTP {r.status}")
@@ -445,7 +469,7 @@ class Fetcher:
             page = parse_page(r.text, r.url)
             if looks_like_challenge(r.text, page.title):
                 note("blocked", "bot check")
-                self._queue_for_browser(run, cand)
+                self._queue_for_browser(run, cand, urlsplit(r.url).hostname)
                 return None
             sources.update_from_page(run.paper, page)
             if (pdf_url := page.pdf_url) and depth < 2:
@@ -458,7 +482,7 @@ class Fetcher:
                 return self._attempt(run, cand.with_(url=target), depth + 1)
             note("no-pdf", "page without a PDF link" + (f": {page.title[:80]!r}" if page.title else ""))
             if cand.via == "direct" and self._may_need_session(cand):
-                run.browser_queue.append(cand)
+                self._queue_for_browser(run, cand, urlsplit(r.url).hostname)
             return None
 
         note("failed", f"unexpected content type {r.content_type or 'unknown'}")
@@ -477,10 +501,15 @@ class Fetcher:
         return None
 
     @staticmethod
-    def _queue_for_browser(run: _Run, cand: Candidate) -> None:
-        """Retry later in the browser: what refused plain HTTP may open there. XML is for APIs, not browsers."""
+    def _queue_for_browser(run: _Run, cand: Candidate, landed: str | None = None) -> None:
+        """Retry later in the browser: what refused plain HTTP may open there. XML is for APIs, not browsers.
+
+        `landed`: the host plain HTTP ended at after redirects (from doi.org, say); the browser likely ends there too.
+        """
         if cand.via == "direct" and cand.kind != "jats":
             run.browser_queue.append(cand)
+            if landed:
+                run.landed[cand.url] = landed
 
     @staticmethod
     def _may_need_session(cand: Candidate) -> bool:
