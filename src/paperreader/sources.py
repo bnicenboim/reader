@@ -121,16 +121,21 @@ def openalex(client: PoliteClient, cfg: Config, paper: Paper) -> list[Candidate]
 
 def openalex_search(client: PoliteClient, cfg: Config, query: str, n: int = 10) -> list[dict]:
     params = {"search": query, "per-page": str(n),
-              "select": "id,doi,display_name,publication_year,authorships,primary_location,ids,open_access"}
+              "select": "id,doi,type,display_name,publication_year,authorships,primary_location,locations,open_access"}
     if cfg.email:
         params["mailto"] = cfg.email
     data = client.get_json(OPENALEX, params, headers=_openalex_auth(cfg), ttl=86400) or {}
     out = []
     for w in data.get("results", []):
         authors = [(a.get("author") or {}).get("display_name") for a in w.get("authorships") or []]
+        arxiv = next((a for loc in w.get("locations") or []
+                      if (a := arxiv_from_url(loc.get("landing_page_url")) or arxiv_from_url(loc.get("pdf_url")))),
+                     None)
         out.append(
             {
                 "title": w.get("display_name"),
+                "type": w.get("type"),
+                "arxiv": arxiv,
                 "year": w.get("publication_year"),
                 "authors": [a for a in authors if a],
                 "venue": ((w.get("primary_location") or {}).get("source") or {}).get("display_name"),
@@ -140,6 +145,17 @@ def openalex_search(client: PoliteClient, cfg: Config, query: str, n: int = 10) 
             }
         )
     return out
+
+
+def hit_identifier(hit: dict) -> str | None:
+    """The identifier to fetch a search hit by.
+
+    For a preprint on arXiv, the arXiv id rather than the DOI: OpenAlex sometimes gives a
+    preprint the DOI of a later repost (e.g. 10.65215/... for "Attention Is All You Need").
+    """
+    if hit.get("arxiv") and (hit.get("type") == "preprint" or not hit.get("doi")):
+        return f"arXiv:{hit['arxiv']}"
+    return f"doi:{hit['doi']}" if hit.get("doi") else None
 
 
 def crossref_search(client: PoliteClient, cfg: Config, query: str, n: int = 10) -> list[dict]:

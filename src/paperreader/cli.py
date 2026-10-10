@@ -19,7 +19,7 @@ from .identifiers import UnrecognizedIdentifier, parse
 from .library import Library, Record
 from .publishers import proxied
 from .ratelimit import QuotaExceeded, RateLimiter
-from .sources import crossref_search, openalex_search
+from .sources import crossref_search, hit_identifier, openalex_search
 
 
 class App:
@@ -65,11 +65,11 @@ def _identify(app: App, text: str):
     except UnrecognizedIdentifier:
         pass
     hits = _search(app, text, n=5)
-    best = next((h for h in hits if h["doi"] and _similar(h["title"] or "", text) >= 0.9), None)
+    best = next((h for h in hits if hit_identifier(h) and _similar(h["title"] or "", text) >= 0.9), None)
     if best:
-        _err(f"matched title: {best['title']} ({best['year']}) doi:{best['doi']}")
-        return parse(f"doi:{best['doi']}")
-    listing = "\n".join(f"  doi:{h['doi']}  {h['title']} ({h['year']})" for h in hits if h["doi"])
+        _err(f"matched title: {best['title']} ({best['year']}) {hit_identifier(best)}")
+        return parse(hit_identifier(best))
+    listing = "\n".join(f"  {hit_identifier(h)}  {h['title']} ({h['year']})" for h in hits if hit_identifier(h))
     raise click.UsageError(
         f"{text!r} is not an identifier and no title matched it exactly."
         + (f" Closest matches:\n{listing}" if listing else "")
@@ -223,7 +223,7 @@ def search(app: App, query, n, as_json):
         return
     for h in hits:
         authors = ", ".join(h["authors"][:3]) + (" et al." if len(h["authors"]) > 3 else "")
-        ident = f"doi:{h['doi']}" if h["doi"] else f"(no DOI; OpenAlex {h['openalex']})"
+        ident = hit_identifier(h) or f"(no DOI; OpenAlex {h['openalex']})"
         oa = " [open access]" if h["oa"] else ""
         click.echo(f"{ident}\n  {h['title']} ({h['year']})\n  {authors}; {h['venue'] or ''}{oa}")
 

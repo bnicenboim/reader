@@ -172,3 +172,22 @@ def test_year_of_a_publisher_copy_is_kept(config, client, router):
     rec = fetcher(config, client).get(parse("10.1038/nature14539"))
     assert rec.paper.year == 2015
     assert not any("export.arxiv.org" in u for u in router.urls())
+
+
+def test_search_prefers_arxiv_id_for_preprints(config, client, router):
+    from paperreader.sources import hit_identifier, openalex_search
+
+    router.add("https://api.openalex.org/works", json_body={"results": [
+        {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.65215/2q58a426", "type": "preprint",
+         "display_name": "Attention Is All You Need", "publication_year": 2025,
+         "locations": [{"landing_page_url": "https://doi.org/10.65215/2q58a426"},
+                       {"landing_page_url": "http://arxiv.org/abs/1706.03762"}]},
+        {"id": "https://openalex.org/W2", "doi": "https://doi.org/10.1038/nature14539", "type": "article",
+         "display_name": "Deep learning", "locations": [{"landing_page_url": "http://arxiv.org/abs/1111.11111"}]},
+        {"id": "https://openalex.org/W3", "doi": None, "type": "preprint", "display_name": "No DOI",
+         "locations": [{"pdf_url": "https://arxiv.org/pdf/2222.22222"}]},
+        {"id": "https://openalex.org/W4", "doi": None, "type": "article", "display_name": "Nothing", "locations": []},
+    ]})
+    hits = openalex_search(client, config, "attention")
+    assert [hit_identifier(h) for h in hits] == ["arXiv:1706.03762", "doi:10.1038/nature14539",
+                                                 "arXiv:2222.22222", None]
