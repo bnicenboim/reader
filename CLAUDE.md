@@ -15,7 +15,9 @@ hand, and without putting unreasonable load on any server.
 ## Commands
 
 ```console
+curl -LsSf https://astral.sh/uv/install.sh | sh   # only if uv is missing; installs to ~/.local/bin
 uv sync --all-extras         # install, including the Playwright browser extra
+uv run paper install-browser # Chromium for the browser route, once per machine (~/.cache/ms-playwright)
 uv run pytest                # unit tests; mocked transport, never touch the network
 uvx ruff check src tests     # lint (line length 120)
 uv run paper --help
@@ -50,8 +52,9 @@ Cheapest and most polite first; stop at the first route that works:
 3. Open-access copies listed by OpenAlex, Unpaywall and Semantic Scholar.
    Versions of record come before preprints.
 4. The publisher over plain HTTP (works on a campus network or VPN).
-5. A real browser with a persistent profile that keeps the user's logins, for sites that refuse scripts.
-6. The institution's proxy, in that browser.
+5. The institution's proxy, in a real browser with a persistent profile that keeps the user's logins.
+6. That browser for sites that refused scripts. It comes after the proxy because a paywalled publisher
+   page fails there anyway, sometimes after a human check that waits for the user.
 
 Lookups are lazy: Unpaywall and Semantic Scholar are only called if the earlier candidates fail.
 
@@ -79,10 +82,12 @@ Dealing with blocking:
 
 Verified on real papers: arXiv, ACL Anthology, PMLR, HAL (the green open-access copy of a
 paywalled Nature paper) and PubMed Central. The browser's PDF download path works.
-There are 62 unit tests, all passing.
+The institutional proxy works: on 10 October 2026 an IEEE paper came through Tilburg's EZproxy
+after `paper login`, with the saved session and a visible window.
+There are 68 unit tests, all passing.
 
 Not verified:
-- Access through an institutional proxy has never been run.
+- The proxy route for publishers other than IEEE (AIP reached the article page through it).
 - ScienceDirect blocked the development server's IP, even in the browser.
 - ACM and OpenReview show a Cloudflare check whose verification server was blocked by the
   development sandbox's network, so they failed there. They may work from a normal
@@ -97,7 +102,8 @@ Not verified:
   matches poorly (it did not find "Attention is all you need"). The key can also come from
   the `OPENALEX_API_KEY` environment variable (how cloud sessions get it).
 - `institution.proxy`: the library's proxy URL template, then `paper login` once to sign in.
-  Tilburg University's proxy URL format is still unknown; ask the user rather than guessing.
+  Tilburg University uses OCLC-hosted EZproxy: `https://tilburguniversity.idm.oclc.org/login?url={url}`,
+  which signs in through SURFconext.
 
 ## Things learned the hard way
 
@@ -120,6 +126,19 @@ Not verified:
   `fullTextXML` serves only the open-access subset (HTTP 500 otherwise). NCBI `efetch` (`db=pmc`) also
   serves author manuscripts, wrapped in `<pmc-articleset>`; for publishers that refuse XML downloads
   (PNAS, for one) it returns the front matter only, which counts as a failure.
+- Institutional sign-in passes through identity providers (EZproxy, SURFconext, Microsoft, ADFS).
+  `html.looks_like_sign_in` spots those pages; the browser waits on them, and if the chain stops there
+  (Microsoft's "Pick an account" needs a click) the page counts as a check and a visible window opens.
+- Microsoft's sign-in page has a `<noscript>` refresh to `/jsdisabled`; the page parser ignores
+  everything inside `<noscript>`.
+- EZproxy and the identity providers keep the sign-in in session cookies, which Chromium drops on exit.
+  `browser.py` saves them to `session-cookies.json` in the state directory (also while `paper login`
+  is open) and restores them at the next start.
+- A visible Chromium (153) crashes with SIGTRAP when a download starts if its history lists an earlier
+  download. `_forget_downloads` clears the download tables of the profile's `History` before each launch.
+- IEEE Xplore answers headless Chromium with HTTP 418, which counts as a bot check (visible retry). Its
+  pages have no `citation_pdf_url`; the PDF is `/stampPDF/getPDF.jsp?tp=&arnumber=N`, with N from the
+  `/document/N` URL.
 
 ## Next steps
 

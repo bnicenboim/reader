@@ -1,8 +1,9 @@
 from conftest import make_pdf
 
+from paperreader.browser import load_session_cookies, save_session_cookies
 from paperreader.config import Config
 from paperreader.extract import is_pdf, jats_to_text, pdf_info, pdf_to_text
-from paperreader.html import looks_like_challenge, parse_page
+from paperreader.html import looks_like_challenge, looks_like_sign_in, parse_page
 from paperreader.library import Library, base_key
 from paperreader.models import Paper
 from paperreader.publishers import proxied, publisher_pdf_url
@@ -65,6 +66,41 @@ def test_challenge_detection():
     assert not looks_like_challenge(script, "Deep learning")
 
 
+def test_noscript_refresh_is_ignored():
+    # Microsoft's sign-in page, as a browser with JavaScript renders it.
+    html = """<html><head><title>Sign in to your account</title>
+      <noscript><meta http-equiv="Refresh" content="0; URL=https://login.microsoftonline.com/jsdisabled" /></noscript>
+      </head></html>"""
+    page = parse_page(html, "https://login.microsoftonline.com/tenant/saml2")
+    assert page.refresh_url is None
+    assert page.title == "Sign in to your account"
+
+
+def test_sign_in_detection():
+    proxy = "tilburguniversity.idm.oclc.org"
+    assert looks_like_sign_in("https://login.microsoftonline.com/7a55/saml2?SAMLRequest=x", proxy)
+    assert looks_like_sign_in("https://engine.surfconext.nl/authentication/idp/single-sign-on", proxy)
+    assert looks_like_sign_in("https://adfs.campus.uvt.nl/adfs/ls/?SAMLRequest=x", proxy)
+    assert looks_like_sign_in(f"https://{proxy}/login?url=https://doi.org/10.1121/x", proxy)
+    # Proxied content and publisher pages are not sign-in pages.
+    assert not looks_like_sign_in("https://pubs-aip-org.tilburguniversity.idm.oclc.org/jasa/article/x", proxy)
+    assert not looks_like_sign_in("https://doi.org/10.1121/10.0040820", proxy)
+    assert not looks_like_sign_in("https://www.example.edu/login", None)
+
+
+def test_session_cookies_survive_and_expire(config, monkeypatch):
+    cookies = [
+        {"name": "ezproxy", "value": "s1", "domain": ".idm.oclc.org", "path": "/", "expires": -1},
+        {"name": "persistent", "value": "p", "domain": ".example.org", "path": "/", "expires": 2e9},
+    ]
+    save_session_cookies(config, cookies)
+    path = config.state_dir / "session-cookies.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert [c["name"] for c in load_session_cookies(config)] == ["ezproxy"]  # Chromium keeps the persistent one
+    monkeypatch.setattr("paperreader.browser.time.time", lambda: path.stat().st_mtime + 2 * 24 * 3600)
+    assert load_session_cookies(config) == []
+
+
 def test_keys_are_readable_ascii():
     p = Paper(title="Learning to Understand Child-directed Speech", authors=["Grzegorz Chrupała"], year=2020)
     assert base_key(p) == "chrupala2020-learning-understand-child-directed"
@@ -92,3 +128,25 @@ def test_publisher_urls_and_proxy():
     assert proxied(cfg, "https://doi.org/10.1/x") == "https://login.ezproxy.example.edu/login?url=https://doi.org/10.1/x"
     cfg = Config(proxy="https://go.openathens.net/redirector/example.edu?url={url_encoded}")
     assert proxied(cfg, "https://doi.org/10.1/x").endswith("?url=https%3A%2F%2Fdoi.org%2F10.1%2Fx")
+
+
+def test_download_history_is_forgotten(tmp_path):
+    import sqlite3
+
+    from paperreader.browser import _forget_downloads
+
+    history = tmp_path / "Default" / "History"
+    history.parent.mkdir()
+    db = sqlite3.connect(history)
+    for table in ("downloads", "downloads_url_chains", "downloads_slices"):
+        db.execute(f"CREATE TABLE {table} (id INTEGER)")
+        db.execute(f"INSERT INTO {table} VALUES (1)")
+    db.execute("CREATE TABLE urls (id INTEGER)")
+    db.execute("INSERT INTO urls VALUES (1)")
+    db.commit()
+    db.close()
+    _forget_downloads(tmp_path)
+    db = sqlite3.connect(history)
+    assert db.execute("SELECT COUNT(*) FROM downloads").fetchone() == (0,)
+    assert db.execute("SELECT COUNT(*) FROM urls").fetchone() == (1,)  # browsing history is kept
+    _forget_downloads(tmp_path / "missing")  # no profile yet: nothing to do
