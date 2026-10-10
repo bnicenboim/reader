@@ -108,14 +108,15 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 139 unit tests, all passing, and 24 network tests.
+There are 141 unit tests, all passing, and 24 network tests.
 
 The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
 headless Chromium against a local server (check not completed, mark remembered by the next process,
 tab or browser closed during the wait). It has not been tried on a real site with a visible window.
-Skipping pages that redirect to a site with an unfinished check (issue #7) was tested with the fake browser only.
-The browser launch without automation switches (issue #9) was checked with headless Chromium on a local page
-(`navigator.webdriver` is false); not yet with a visible window or on a real Cloudflare check.
+On 10 October 2026, from the user's desktop: with the browser launched without automation switches (issue #9),
+the checks at www.science.org, pubs.aip.org, cell.com, www.sciencedirect.com and research.tilburguniversity.edu
+were all passed in the visible window, where before none was. Pages see `navigator.webdriver` false, headless and
+visible. The same day doi.org was skipped for Science in a later run, with no window (issue #7).
 The download check (issue #5) finds no mismatch among the 39 papers in the library of 10 October 2026,
 and finds the one known wrong entry.
 
@@ -198,12 +199,21 @@ Not verified:
   all of its own. The check needs 85% of the words (all of them up to six) within about twice the title's
   length. The DOI settles most cases before that: 37 of the 39 print it on the first two pages.
 - Cloudflare checks shown to the user in the automated Chromium were never passed (Science, AIP and Pure,
-  10 October 2026, issue #9), even when completed. The browser now launches without
-  `--enable-automation` and with `--disable-blink-features=AutomationControlled` (`browser.UNMARKED_ARGS`),
-  so pages see `navigator.webdriver` false. Whether checks then pass is not known yet; the next things to
-  try, in #9's order: the installed Chrome (`browser.channel = "chrome"`), the user's own Chrome
-  (`browser.cdp_url`), then a patched driver or a stealth layer. Until then such a site is asked once and
-  left to `paper pending`.
+  10 October 2026, issue #9), even when completed. Launched without `--enable-automation` and with
+  `--disable-blink-features=AutomationControlled` (`browser.UNMARKED_ARGS`), so that `navigator.webdriver` is
+  false, the browser passed them all the same evening. If a site still refuses: the installed Chrome
+  (`browser.channel = "chrome"`), the user's own Chrome (`browser.cdp_url`), then a patched driver.
+- ScienceDirect answers headless Chromium (user agent HeadlessChrome) with "There was a problem providing the
+  content you requested" (HTTP 403), also through the proxy; the visible window gets the article page. Its
+  pages have no `citation_pdf_url`, so no PDF is found there yet.
+- Annual Reviews has no `citation_pdf_url`; its PDF is the action of a POST form in the page body
+  (`/deliver/fulltext/...pdf?...mimeType=pdf`, `html.DELIVER_FORM_RE`), and a GET of it returns the PDF too.
+  Its PDFs carry "Downloaded from www.annualreviews.org. <institution> IP: ..." on every page.
+- dspace.mit.edu (CloudFront) answers scripts with AWS WAF's CAPTCHA: HTTP 405, title "Human Verification".
+  A check page with any error status is now left for the browser.
+- Through the proxy, Science's page for a 1977 article offers "Check Access" and "Purchase", and its PDF URL
+  returns that page: Tilburg seems to lack the archive. 10.1121/10.0040820 is an ASA meeting abstract in a
+  JASA supplement, with no PDF.
 - The browser's log of a human check names the host where the page ended up (www.science.org), not the
   requested one (doi.org); unfinished checks are kept per site in `ratelimit.sqlite` (table `checks`).
   A page that leads to such a site is skipped too (issue #7): where plain HTTP ended up after redirects

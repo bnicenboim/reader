@@ -65,6 +65,7 @@ def test_page_metadata():
 def test_challenge_detection():
     assert looks_like_challenge("<html></html>", "Just a moment...")
     assert looks_like_challenge("<script>window._cf_chl_opt={}</script>", None)
+    assert looks_like_challenge("<html></html>", "Human Verification")  # AWS WAF
     # Cloudflare injects this script into ordinary pages too; it is not a wall by itself.
     script = '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>'
     assert not looks_like_challenge(script, "Deep learning")

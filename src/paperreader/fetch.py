@@ -418,7 +418,7 @@ class Fetcher:
             note("failed", f"{type(e).__name__}: {str(e).splitlines()[0]}")
             return None
 
-        if r.status in BLOCKED_STATUSES:
+        if r.status in BLOCKED_STATUSES or (r.status >= 400 and self._is_check_page(r)):
             check = r.headers.get(CHALLENGE_HEADER)
             page_host = urlsplit(r.url).hostname or host
             if check:
@@ -499,6 +499,11 @@ class Fetcher:
         if verdict.ok is False:
             return f"the download does not match the requested paper ({verdict.detail})"
         return None
+
+    @staticmethod
+    def _is_check_page(r: Response) -> bool:
+        """A human check served with another error status (AWS WAF's CAPTCHA comes with 405)."""
+        return "html" in r.content_type and looks_like_challenge(r.text, parse_page(r.text, r.url).title)
 
     @staticmethod
     def _queue_for_browser(run: _Run, cand: Candidate, landed: str | None = None) -> None:

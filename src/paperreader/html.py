@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
@@ -103,7 +104,15 @@ def parse_page(html: str, url: str) -> PageInfo:
     p.close()
     title = " ".join("".join(p._title).split())
     info.title = title or None
+    if m := DELIVER_FORM_RE.search(html):
+        info.pdf_links.append(unescape(m.group(1)))
     return info
+
+
+# Annual Reviews (and other sites on the same platform, pub2web) offer the PDF only through a form in the
+# page body, with no citation_pdf_url. A GET of the form's action returns the PDF too (10 October 2026).
+DELIVER_FORM_RE = re.compile(r"""<form\b[^>]*\baction=["'](/deliver/fulltext/[^"']+?\.pdf\?[^"']*mimeType=pdf[^"']*)""",
+                             re.IGNORECASE)
 
 
 CHALLENGE_TITLES = (
@@ -118,6 +127,7 @@ CHALLENGE_TITLES = (
     "bot verification",
     "one more step",
     "preparing your download",
+    "human verification",  # AWS WAF's CAPTCHA (HTTP 405), e.g. dspace.mit.edu
 )
 
 CHALLENGE_MARKERS = (
