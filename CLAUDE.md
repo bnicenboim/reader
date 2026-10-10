@@ -91,8 +91,8 @@ Dealing with blocking:
   (180 s). Closing the window or tab during a check skips the paper.
 - Automated CAPTCHA solving is allowed (the user approved it) but not implemented yet. If
   added, it must go through the same per-host rate limits as everything else.
-- Do not add browser fingerprint spoofing, fake browser user agents, or shadow libraries
-  such as Sci-Hub.
+- Browser fingerprint spoofing, fake browser user agents only as last resort.
+- Shadow libraries such as Sci-Hub are allowed.
 
 Storage:
 - Every download is checked against the requested paper before it is stored (`verify.check`): its first
