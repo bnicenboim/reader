@@ -228,3 +228,48 @@ def test_a_page_in_the_real_browser_sees_no_webdriver(config, client):
         assert page.evaluate("navigator.webdriver") is False
     finally:
         browser.close()
+
+
+def test_a_hung_browser_is_ended_and_the_next_page_starts_a_new_one(config, client, monkeypatch):
+    """A Playwright call that never returns (seen twice on 10 October 2026) ends in BrowserHung, not a hang."""
+    pytest.importorskip("playwright")
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from paperreader import browser as browser_mod
+
+    class Page(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<title>ok</title><p>a local page</p>")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/"
+    config.timeout = 1
+    monkeypatch.setattr(browser_mod, "HANG_MARGIN", 1.0)  # deadline: 2 * 1 + 1 s
+    snapshot = browser_mod._snapshot
+    monkeypatch.setattr(browser_mod, "_snapshot", lambda page: page.wait_for_timeout(600_000))
+    browser = Browser(config, client.limiter)
+    try:
+        try:
+            browser._start()
+        except BrowserUnavailable:
+            pytest.skip("no browser installed (paper install-browser)")
+        if browser._pid is None:
+            pytest.skip("no profile lock to find the browser process (Windows)")
+        start = time.monotonic()
+        with pytest.raises(browser_mod.BrowserHung):
+            browser.fetch(url)
+        assert time.monotonic() - start < 10
+        monkeypatch.setattr(browser_mod, "_snapshot", snapshot)
+        assert b"a local page" in browser.fetch(url).content
+    finally:
+        browser.close()
+        server.shutdown()

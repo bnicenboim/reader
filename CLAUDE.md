@@ -108,7 +108,7 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 143 unit tests, all passing, and 24 network tests.
+There are 144 unit tests, all passing, and 24 network tests.
 
 The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
 headless Chromium against a local server (check not completed, mark remembered by the next process,
@@ -117,7 +117,8 @@ On 10 October 2026, from the user's desktop: with the browser launched without a
 the checks at www.science.org, pubs.aip.org, cell.com, www.sciencedirect.com and research.tilburguniversity.edu
 were all passed in the visible window, where before none was. Pages see `navigator.webdriver` false, headless and
 visible. The same day doi.org was skipped for Science in a later run, with no window (issue #7), and PDFs came
-through the proxy from Annual Reviews and from ScienceDirect (headless refused, then the visible window).
+through the proxy from Annual Reviews and from ScienceDirect (three papers: headless refused, then the visible
+window).
 The download check (issue #5) finds no mismatch among the 39 papers in the library of 10 October 2026,
 and finds the one known wrong entry.
 
@@ -218,6 +219,12 @@ Not verified:
 - Through the proxy, Science's page for a 1977 article offers "Check Access" and "Purchase", and its PDF URL
   returns that page: Tilburg seems to lack the archive. 10.1121/10.0040820 is an ASA meeting abstract in a
   JASA supplement, with no PDF.
+- Twice on 10 October 2026 a `paper get` hung for good in its first browser page (a proxied Elsevier DOI,
+  headless): Python waited on a Playwright call that never returned while the browser sat idle, with no
+  download started. It did not happen in 8 repeats of that page alone, nor against a local server with a
+  meta refresh into a large 403 page; the cause is not known. Since then a page load that runs past
+  2 x `timeout` + the wait for a person + 30 s ends the browser (its pid comes from the profile's
+  `SingletonLock` link; not on Windows, and never with `cdp_url`), and fails as `BrowserHung`.
 - The browser's log of a human check names the host where the page ended up (www.science.org), not the
   requested one (doi.org); unfinished checks are kept per site in `ratelimit.sqlite` (table `checks`).
   A page that leads to such a site is skipped too (issue #7): where plain HTTP ended up after redirects
