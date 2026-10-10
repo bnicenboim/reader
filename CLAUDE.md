@@ -31,7 +31,7 @@ Tests marked `network` hit real servers and are deselected by default.
 | `config.py` | TOML config, per-host `Limit`s, config template |
 | `ratelimit.py` | per-host spacing plus hourly/daily caps, stored in SQLite and shared across processes |
 | `http.py` | `PoliteClient`: rate-limits each redirect hop, honours `Retry-After`, caches API answers |
-| `sources.py` | OpenAlex, Unpaywall, Semantic Scholar, arXiv, Europe PMC, ACL, OpenReview, Crossref search |
+| `sources.py` | OpenAlex, Unpaywall, Semantic Scholar, arXiv, Europe PMC, NCBI E-utilities, ACL, OpenReview, Crossref search |
 | `publishers.py` | PDF URL templates by DOI prefix, Elsevier API, institutional proxy URL rewriting |
 | `html.py` | landing-page metadata (`citation_pdf_url`, meta refresh) and bot-wall detection |
 | `browser.py` | Playwright with a persistent profile, `login`, human-check handling |
@@ -45,7 +45,8 @@ Tests marked `network` hit real servers and are deselected by default.
 Cheapest and most polite first; stop at the first route that works:
 
 1. The library, matched on any id (a paper fetched by arXiv id is found again by DOI).
-2. Open repositories: arXiv, ACL Anthology, OpenReview, PubMed Central full text via Europe PMC.
+2. Open repositories: arXiv, ACL Anthology, OpenReview, PubMed Central full text via Europe PMC
+   and NCBI E-utilities.
 3. Open-access copies listed by OpenAlex, Unpaywall and Semantic Scholar.
    Versions of record come before preprints.
 4. The publisher over plain HTTP (works on a campus network or VPN).
@@ -78,7 +79,7 @@ Dealing with blocking:
 
 Verified on real papers: arXiv, ACL Anthology, PMLR, HAL (the green open-access copy of a
 paywalled Nature paper) and PubMed Central. The browser's PDF download path works.
-There are 56 unit tests, all passing.
+There are 62 unit tests, all passing.
 
 Not verified:
 - Access through an institutional proxy has never been run.
@@ -114,6 +115,11 @@ Not verified:
 - OpenAlex charges title search 10x a lookup against the shared free allowance; the key is
   sent as an `Authorization: Bearer` header so it stays out of URLs and cache keys.
 - Semantic Scholar often returns 429 without a key.
+- PMC article pages (ncbi.nlm.nih.gov/pmc, pmc.ncbi.nlm.nih.gov) show a bot check to scripts, so PMC
+  locations from OpenAlex and Unpaywall are turned into a PMCID instead of being fetched. Europe PMC's
+  `fullTextXML` serves only the open-access subset (HTTP 500 otherwise). NCBI `efetch` (`db=pmc`) also
+  serves author manuscripts, wrapped in `<pmc-articleset>`; for publishers that refuse XML downloads
+  (PNAS, for one) it returns the front matter only, which counts as a failure.
 
 ## Next steps
 

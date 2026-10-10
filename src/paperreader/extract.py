@@ -151,6 +151,8 @@ def _find(root: ET.Element, *path: str) -> ET.Element | None:
 def jats_to_text(xml: bytes) -> tuple[str, dict]:
     """Markdown body and metadata ({title, authors}) from a JATS article."""
     root = ET.fromstring(xml)
+    if _local(root.tag) == "pmc-articleset":  # NCBI efetch wraps the article
+        root = next((c for c in root if _local(c.tag) == "article"), root)
     meta: dict = {}
     if (t := _find(root, "article-meta", "article-title")) is not None:
         meta["title"] = _squash(_inline(t))
