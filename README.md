@@ -124,7 +124,8 @@ The tool deals with them like this:
   while it showed them, even when completed by hand. It does not disguise itself further:
   headless, its user agent says HeadlessChrome. If a site's check still does not pass, try
   `browser.channel = "chrome"` (your installed Chrome) or `browser.cdp_url` (your everyday Chrome).
-- It does not solve CAPTCHAs automatically (yet) or use shadow libraries.
+- It does not solve CAPTCHAs or use shadow libraries such as Sci-Hub. Both are allowed
+  but not implemented.
 
 ## Politeness
 
