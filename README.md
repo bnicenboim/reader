@@ -203,6 +203,35 @@ the same check over the library and reports mismatches; `--remove` moves them in
 one section (repeatable), and `--no-refs` leaves out the reference list. PDF text
 is cleaned of HAL cover pages and "Downloaded from ..." watermarks.
 
+### Claude Code on the web
+
+Cloud sessions start in a fresh container, so the CLI and the plugin have to be installed
+each time. In the environment's settings (the cloud environment menu in the session's
+title bar, then Edit), put this in **Setup script**; it then runs before every session in
+that environment, whatever the repository:
+
+```bash
+#!/bin/bash
+command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install 'paperreader[figures] @ git+https://github.com/gchrupala/reader'
+claude plugin marketplace add gchrupala/reader
+claude plugin install paperreader@paperreader
+```
+
+In the same settings:
+
+- **Environment variables**: `OPENALEX_API_KEY` and `PAPERREADER_EMAIL`. The setup script
+  cannot read them, but `paper` can when it runs.
+- **Network access**: the default (limited) level blocks publishers and most of the APIs.
+  Choose full access, or add the hosts you need under allowed domains.
+
+A cloud session has no person at a browser and no campus network, so it gets open-access
+papers only; run `paper get` with `--no-browser`. The library, `paper pending` included,
+disappears with the container, so keep the texts with `--export DIR` in the repository you
+are working on, and save the failures with `paper pending --tsv > missing.tsv` to fetch
+them at your own machine with `paper get --from missing.tsv`.
+
 ## Commands
 
 | command | |
