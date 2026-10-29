@@ -53,3 +53,16 @@ Anthology id, an OpenReview or OSF id, a URL, an exact title, or a library key. 
   machine, or `paper add FILE [ID]` for a PDF they downloaded themselves.
 - `get` may open a visible browser window for a human check and wait up to a few minutes for the
   user; tell them when that may happen. In a session without a display, pass `--no-browser`.
+
+## In a cloud session
+
+In Claude Code on the web (`CLAUDE_CODE_REMOTE=true`) or any container without a display:
+
+- Pass `--no-browser`: there is no person to complete a human check or sign in, and no campus
+  network, so only open-access papers come through.
+- The library, `paper pending` included, disappears with the container. Keep the texts with
+  `paper get ... --export DIR` into the repository you are working in, and the failures with
+  `paper pending --tsv > missing.tsv`, so the user can fetch them at their own machine with
+  `paper get --from missing.tsv`. Ask the user before committing either.
+- If `paper` is missing, the environment's setup script should install it; the README of
+  https://github.com/gchrupala/reader has the script ("Claude Code on the web").
