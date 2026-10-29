@@ -48,11 +48,10 @@ runs the real papers from `docs/literature-review-use-case.md` (no browser, your
 | `library.py` | storage, readable or user-chosen keys (`vaswani2017-attention-all-you-need`), lookup by any id or key |
 | `pending.py` | papers that need a person, kept in the library as `pending.json` |
 | `bibtex.py` | BibTeX entries from the stored metadata |
-| `cli.py` | `get`, `read`, `figures`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `verify`, `login`, `usage`, `install-browser`, `config` |
+| `cli.py` | `get`, `read`, `figures`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `verify`, `login`, `usage`, `install-browser`, `install-skill`, `config` |
 
-The repository is also a Claude Code plugin marketplace (`.claude-plugin/marketplace.json`) with one plugin,
-`paperreader` (in `plugin/`), whose skill `plugin/skills/paperreader/SKILL.md` tells agents how to use the CLI.
-Keep it in step with the commands; `claude plugin validate .` checks the manifests.
+`src/paperreader/SKILL.md` is a Claude Code skill that tells agents how to use the CLI; `paper install-skill`
+copies it to `~/.claude/skills/paperreader/`. Keep it in step with the commands.
 
 ## Fetch order
 
@@ -114,7 +113,7 @@ after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
 complete; a few pages with unusual captions are rendered whole.
-There are 144 unit tests, all passing, and 24 network tests.
+There are 145 unit tests, all passing, and 24 network tests.
 
 The handling of human checks (issue #4) was tested with a fake browser in the unit tests, and with real
 headless Chromium against a local server (check not completed, mark remembered by the next process,

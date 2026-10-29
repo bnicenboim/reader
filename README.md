@@ -69,6 +69,7 @@ this existed, and cleans their text again.
 ```console
 uv tool install 'paperreader[browser,figures] @ git+https://github.com/gchrupala/reader'
 paper install-browser   # Chromium for the browser fallback; or set browser.channel = "chrome"
+paper install-skill     # tells Claude Code how to use `paper`, in every session
 paper config --init     # writes ~/.config/paperreader/config.toml
 ```
 
@@ -145,17 +146,10 @@ The tool deals with them like this:
 
 ## Using it from an agent
 
-The CLI is designed to be driven by a coding agent such as Claude Code. This repository is
-also a Claude Code plugin marketplace with a `paperreader` skill (`plugin/skills/paperreader/SKILL.md`)
-that tells Claude when and how to use the CLI, in every session:
-
-```console
-/plugin marketplace add gchrupala/reader
-/plugin install paperreader@paperreader
-```
-
-The plugin does not install the CLI itself; do that as in [Install](#install).
-Instead of the plugin, something like this in your `CLAUDE.md` is enough:
+The CLI is designed to be driven by a coding agent such as Claude Code. `paper install-skill`
+puts a skill in `~/.claude/skills/paperreader/` that tells Claude when and how to use it, in
+every session (run it again after updating `paper`). For other agents, something like this
+in their instructions is enough:
 
 ```markdown
 To read a paper, run `paper get <DOI|arXiv id|URL|title>`; it prints the path of a
@@ -205,24 +199,22 @@ is cleaned of HAL cover pages and "Downloaded from ..." watermarks.
 
 ### Claude Code on the web
 
-Cloud sessions start in a fresh container, so the CLI and the plugin have to be installed
-each time. In the environment's settings (the cloud environment menu in the session's
-title bar, then Edit), put this in **Setup script**; it then runs before every session in
-that environment, whatever the repository:
+Cloud sessions start in a fresh container, so `paper` has to be installed each time. In the
+environment's settings (the cloud environment menu in the session's title bar, then Edit),
+put this in **Setup script**; it then runs before every session in that environment:
 
 ```bash
 #!/bin/bash
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv tool install 'paperreader[figures] @ git+https://github.com/gchrupala/reader'
-claude plugin marketplace add gchrupala/reader
-claude plugin install paperreader@paperreader
+paper install-skill
 ```
 
 In the same settings:
 
-- **Environment variables**: `OPENALEX_API_KEY` and `PAPERREADER_EMAIL`. The setup script
-  cannot read them, but `paper` can when it runs.
+- **Environment variables** (optional, but search and open-access lookups work better):
+  `OPENALEX_API_KEY` and `PAPERREADER_EMAIL`. The setup script cannot read them, but `paper` can.
 - **Network access**: the default (limited) level blocks publishers and most of the APIs.
   Choose full access, or add the hosts you need under allowed domains.
 
@@ -249,6 +241,7 @@ them at your own machine with `paper get --from missing.tsv`.
 | `paper login [URL]` | sign in, in the tool's browser profile |
 | `paper usage` | requests per host against their budgets |
 | `paper install-browser` | download Chromium for the browser fallback |
+| `paper install-skill` | install the Claude Code skill for `paper` |
 | `paper config [--init]` | show or create the configuration |
 
 ## Development

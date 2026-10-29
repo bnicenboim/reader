@@ -12,13 +12,8 @@ institutional access. It rate-limits itself per host; do not work around that.
 
 ## If `paper` is missing
 
-Check with `command -v paper`. If it is not installed, tell the user and offer to run:
-
-```console
-uv tool install 'paperreader[browser,figures] @ git+https://github.com/gchrupala/reader'
-paper install-browser   # Chromium for the browser fallback (once per machine)
-paper config --init     # then set `email` and `keys.openalex` in ~/.config/paperreader/config.toml
-```
+This skill is installed by `paper install-skill`, so `paper` should be there. If `command -v paper`
+finds nothing, tell the user; the README of https://github.com/gchrupala/reader says how to install it.
 
 ## Commands
 
@@ -64,5 +59,3 @@ In Claude Code on the web (`CLAUDE_CODE_REMOTE=true`) or any container without a
   `paper get ... --export DIR` into the repository you are working in, and the failures with
   `paper pending --tsv > missing.tsv`, so the user can fetch them at their own machine with
   `paper get --from missing.tsv`. Ask the user before committing either.
-- If `paper` is missing, the environment's setup script should install it; the README of
-  https://github.com/gchrupala/reader has the script ("Claude Code on the web").

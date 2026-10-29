@@ -118,3 +118,11 @@ def test_read_shows_figures_with_absolute_paths(run, router, config):
     assert f"![Figure 1. A blue box, for testing.]({figdir}/p2-figure-1.png)" in text
     # Papers stored before figures existed get them with `paper figures`.
     assert run("figures", "lecun2015-deep-learning", "--rebuild", "--no-browser").output == out
+
+
+def test_install_skill(run, tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    result = run("install-skill")
+    path = tmp_path / "claude" / "skills" / "paperreader" / "SKILL.md"
+    assert result.output.strip() == str(path)
+    assert path.read_text().startswith("---\nname: paperreader\n")

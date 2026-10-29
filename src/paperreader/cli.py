@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -594,6 +595,20 @@ def install_browser():
     import subprocess
 
     sys.exit(subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"]))
+
+
+@cli.command("install-skill")
+def install_skill():
+    """Install the Claude Code skill that tells agents how to use `paper`.
+
+    Copies it to ~/.claude/skills/paperreader/ (or under $CLAUDE_CONFIG_DIR), where every
+    Claude Code session finds it. Run it again after an update.
+    """
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    dest = base / "skills" / "paperreader" / "SKILL.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text((Path(__file__).parent / "SKILL.md").read_text())
+    click.echo(dest)
 
 
 @cli.command()
