@@ -1,6 +1,6 @@
-# reader
+# paperreader
 
-`paper`: a command-line tool that fetches research papers you are entitled to read
+paperreader (command `paper`): a command-line tool that fetches research papers you are entitled to read
 and turns them into text that you or an AI agent can work with.
 
 ```console
@@ -145,8 +145,17 @@ The tool deals with them like this:
 
 ## Using it from an agent
 
-The CLI is designed to be driven by a coding agent such as Claude Code. Something
-like this in your `CLAUDE.md` is enough:
+The CLI is designed to be driven by a coding agent such as Claude Code. This repository is
+also a Claude Code plugin marketplace with a `paperreader` skill (`plugin/skills/paperreader/SKILL.md`)
+that tells Claude when and how to use the CLI, in every session:
+
+```console
+/plugin marketplace add gchrupala/reader
+/plugin install paperreader@paperreader
+```
+
+The plugin does not install the CLI itself; do that as in [Install](#install).
+Instead of the plugin, something like this in your `CLAUDE.md` is enough:
 
 ```markdown
 To read a paper, run `paper get <DOI|arXiv id|URL|title>`; it prints the path of a

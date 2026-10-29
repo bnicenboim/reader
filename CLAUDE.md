@@ -50,6 +50,10 @@ runs the real papers from `docs/literature-review-use-case.md` (no browser, your
 | `bibtex.py` | BibTeX entries from the stored metadata |
 | `cli.py` | `get`, `read`, `figures`, `add`, `bib`, `pending`, `resolve`, `search`, `list`, `verify`, `login`, `usage`, `install-browser`, `config` |
 
+The repository is also a Claude Code plugin marketplace (`.claude-plugin/marketplace.json`) with one plugin,
+`paperreader` (in `plugin/`), whose skill `plugin/skills/paperreader/SKILL.md` tells agents how to use the CLI.
+Keep it in step with the commands; `claude plugin validate .` checks the manifests.
+
 ## Fetch order
 
 Cheapest and most polite first; stop at the first route that works:
