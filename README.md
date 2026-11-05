@@ -125,8 +125,8 @@ The tool deals with them like this:
   while it showed them, even when completed by hand. It does not disguise itself further:
   headless, its user agent says HeadlessChrome. If a site's check still does not pass, try
   `browser.channel = "chrome"` (your installed Chrome) or `browser.cdp_url` (your everyday Chrome).
-- It does not solve CAPTCHAs or use shadow libraries such as Sci-Hub. Both are allowed
-  but not implemented.
+- It does not solve CAPTCHAs. It gets papers only from open repositories, open-access
+  copies and the access your institution gives you.
 
 ## Politeness
 
@@ -253,3 +253,7 @@ uv run pytest
 
 Tests use a mocked transport and never touch the network. `uv run pytest -m network`
 runs the real papers from `docs/literature-review-use-case.md` against real servers.
+
+## License
+
+MIT (see `LICENSE`). The optional `figures` extra installs PyMuPDF, which is AGPL-3.0.

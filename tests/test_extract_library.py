@@ -102,13 +102,13 @@ def test_noscript_refresh_is_ignored():
 
 
 def test_sign_in_detection():
-    proxy = "tilburguniversity.idm.oclc.org"
+    proxy = "example.idm.oclc.org"
     assert looks_like_sign_in("https://login.microsoftonline.com/7a55/saml2?SAMLRequest=x", proxy)
     assert looks_like_sign_in("https://engine.surfconext.nl/authentication/idp/single-sign-on", proxy)
     assert looks_like_sign_in("https://adfs.campus.uvt.nl/adfs/ls/?SAMLRequest=x", proxy)
     assert looks_like_sign_in(f"https://{proxy}/login?url=https://doi.org/10.1121/x", proxy)
     # Proxied content and publisher pages are not sign-in pages.
-    assert not looks_like_sign_in("https://pubs-aip-org.tilburguniversity.idm.oclc.org/jasa/article/x", proxy)
+    assert not looks_like_sign_in("https://pubs-aip-org.example.idm.oclc.org/jasa/article/x", proxy)
     assert not looks_like_sign_in("https://doi.org/10.1121/10.0040820", proxy)
     assert not looks_like_sign_in("https://www.example.edu/login", None)
 
@@ -182,7 +182,7 @@ def test_pdf_text_cleaning():
 
     raw = ("it showed effects [F(2, 42) = 17.37, p = 3.2e\r\n−6\r\n, η2 = .453] and more\r\n"
            "Downloaded from http://royalsocietypublishing.org/rstb/article-pdf/doi/10.1098/x.pdf\r\nby guest\r\n"
-           "a rate of 2.5 × 10\r\n−3\r\nper second\r\nAuthorized licensed use limited to: Tilburg University. "
+           "a rate of 2.5 × 10\r\n−3\r\nper second\r\nAuthorized licensed use limited to: Example University. "
            "Downloaded on October 10,2026 at 11:48:02 UTC from IEEE Xplore. Restrictions apply. ")
     assert _clean(raw) == "it showed effects [F(2, 42) = 17.37, p = 3.2e−6, η2 = .453] and more\n" \
                           "a rate of 2.5 × 10^−3\nper second"

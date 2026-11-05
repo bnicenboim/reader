@@ -3,6 +3,8 @@ name = "paperreader"
 version = "0.1.0"
 description = "Fetch and read research papers politely: open-access sources first, institutional access through your own browser session."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",

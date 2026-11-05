@@ -14,8 +14,8 @@ Items are ordered by how much they would have helped.
 ## Status
 
 All twelve items were implemented on 10 October 2026. The test cases below are in
-`tests/test_network.py` (`uv run pytest -m network`); all 21 pass from a desktop on the
-Tilburg University network, without the browser.
+`tests/test_network.py` (`uv run pytest -m network`); all 21 pass from a desktop on a
+university network, without the browser.
 
 1. bioRxiv/medRxiv: `sources.biorxiv` uses the API for the latest version's JATS XML and
    PDF. Cloudflare's 1015 is reported as "blocked by Cloudflare at <host>", is not retried,

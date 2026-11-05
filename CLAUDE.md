@@ -92,12 +92,9 @@ Dealing with blocking:
   for the rest of the run, and not for `browser.check_memory_hours` (12) in later runs unless they are
   `--visible` or `paper pending --retry`. One paper waits for a person at most `browser.paper_wait`
   (180 s). Closing the window or tab during a check skips the paper.
-- Automated CAPTCHA solving is allowed (the user approved it) but not implemented yet. If
-  added, it must go through the same per-host rate limits as everything else.
-- Browser fingerprint spoofing and fake user agents are allowed but not implemented. The
-  browser is only launched without automation markers (`UNMARKED_ARGS`), which is neither a
-  spoofed fingerprint nor a fake user agent; headless, it still reports HeadlessChrome.
-- Shadow libraries such as Sci-Hub are allowed but not implemented.
+- The tool does not solve CAPTCHAs, spoof browser fingerprints or fake user agents, and it does
+  not use shadow libraries. The browser is only launched without automation markers (`UNMARKED_ARGS`);
+  headless, it still reports HeadlessChrome.
 
 Storage:
 - Every download is checked against the requested paper before it is stored (`verify.check`): its first
@@ -108,7 +105,7 @@ Storage:
 
 Verified on real papers: arXiv, ACL Anthology, PMLR, HAL (the green open-access copy of a
 paywalled Nature paper) and PubMed Central. The browser's PDF download path works.
-The institutional proxy works: on 10 October 2026 an IEEE paper came through Tilburg's EZproxy
+The institutional proxy works: on 10 October 2026 an IEEE paper came through the user's institutional EZproxy
 after `paper login`, with the saved session and a visible window.
 Figures and tables were checked by eye on about 40 papers in the user's library (PNAS, IEEE, Royal
 Society, Cognitive Science, CVPR-style arXiv, APA manuscripts, PMC author manuscripts): crops are
@@ -119,7 +116,7 @@ The handling of human checks (issue #4) was tested with a fake browser in the un
 headless Chromium against a local server (check not completed, mark remembered by the next process,
 tab or browser closed during the wait). It has not been tried on a real site with a visible window.
 On 10 October 2026, from the user's desktop: with the browser launched without automation switches (issue #9),
-the checks at www.science.org, pubs.aip.org, cell.com, www.sciencedirect.com and research.tilburguniversity.edu
+the checks at www.science.org, pubs.aip.org, cell.com, www.sciencedirect.com and a university's Pure repository
 were all passed in the visible window, where before none was. Pages see `navigator.webdriver` false, headless and
 visible. The same day doi.org was skipped for Science in a later run, with no window (issue #7), and PDFs came
 through the proxy from Annual Reviews and from ScienceDirect (three papers: headless refused, then the visible
@@ -144,8 +141,8 @@ Not verified:
   matches poorly (it did not find "Attention is all you need"). The key can also come from
   the `OPENALEX_API_KEY` environment variable (how cloud sessions get it).
 - `institution.proxy`: the library's proxy URL template, then `paper login` once to sign in.
-  Tilburg University uses OCLC-hosted EZproxy: `https://tilburguniversity.idm.oclc.org/login?url={url}`,
-  which signs in through SURFconext.
+  OCLC-hosted EZproxy looks like `https://<institution>.idm.oclc.org/login?url={url}`; sign-in may
+  pass through a federation such as SURFconext.
 
 ## Things learned the hard way
 
@@ -210,7 +207,7 @@ Not verified:
   10 October 2026, issue #9), even when completed. Launched without `--enable-automation` and with
   `--disable-blink-features=AutomationControlled` (`browser.UNMARKED_ARGS`), so that `navigator.webdriver` is
   false, the browser passed them all the same evening. If a site still refuses: the installed Chrome
-  (`browser.channel = "chrome"`), the user's own Chrome (`browser.cdp_url`), then a patched driver.
+  (`browser.channel = "chrome"`) or the user's own Chrome (`browser.cdp_url`).
 - ScienceDirect answers headless Chromium (user agent HeadlessChrome) with "There was a problem providing the
   content you requested" (HTTP 403, some 770 kB into the page), also through the proxy. Like IEEE's 418 it
   counts as a bot check (`html.refuses_headless`), and the visible window gets the article page. That page has
@@ -222,7 +219,7 @@ Not verified:
 - dspace.mit.edu (CloudFront) answers scripts with AWS WAF's CAPTCHA: HTTP 405, title "Human Verification".
   A check page with any error status is now left for the browser.
 - Through the proxy, Science's page for a 1977 article offers "Check Access" and "Purchase", and its PDF URL
-  returns that page: Tilburg seems to lack the archive. 10.1121/10.0040820 is an ASA meeting abstract in a
+  returns that page: the institution seems to lack the archive. 10.1121/10.0040820 is an ASA meeting abstract in a
   JASA supplement, with no PDF.
 - Twice on 10 October 2026 a `paper get` hung for good in its first browser page (a proxied Elsevier DOI,
   headless): Python waited on a Playwright call that never returned while the browser sat idle, with no
