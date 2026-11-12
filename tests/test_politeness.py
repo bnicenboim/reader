@@ -99,6 +99,14 @@ def test_long_retry_after_gives_up(client, router):
         client.get("https://api.example.org/x")
 
 
+def test_a_download_that_takes_too_long_is_given_up(config, client, router):
+    router.add("https://slow.example/file.zip", content=b"some bytes")
+    assert client.get("https://slow.example/file.zip").content == b"some bytes"
+    config.max_download_seconds = -1.0  # any download is now too slow
+    with pytest.raises(httpx.ReadTimeout, match="still downloading"):
+        client.get("https://slow.example/file.zip")
+
+
 def test_cloudflare_1015_is_a_block_not_retried(client, router):
     router.add("https://www.biorxiv.org/x.pdf", status=429, headers={"server": "cloudflare"},
                content=b"error code: 1015")

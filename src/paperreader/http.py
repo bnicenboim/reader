@@ -184,10 +184,15 @@ class PoliteClient:
                         method = "GET"
                     continue
                 body = bytearray()
+                started = time.monotonic()
                 for chunk in r.iter_bytes():
                     body += chunk
                     if max_bytes is not None and len(body) > max_bytes:
                         raise TooLarge(f"{url}: response larger than {max_bytes} bytes")
+                    # httpx's timeout is per read, so a server that trickles data could hold us forever.
+                    if time.monotonic() - started > self.config.max_download_seconds:
+                        raise httpx.ReadTimeout(
+                            f"still downloading after {self.config.max_download_seconds:.0f} s", request=r.request)
                 return Response(str(r.url), r.status_code, r.headers, bytes(body), history)
 
     def get(self, url: str, **kw) -> Response:
