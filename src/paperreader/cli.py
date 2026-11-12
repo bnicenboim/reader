@@ -643,6 +643,7 @@ def config_cmd(app: App, init):
                f"openalex={secret(cfg.openalex_key)} elsevier={secret(cfg.elsevier_key)}")
     d = cfg.default_limit
     click.echo(f"default limit: {d.interval}s between requests, {d.per_hour}/hour, {d.per_day}/day per host")
+    click.echo(f"download:      at most {cfg.max_download_seconds:.0f}s per file")
 
 
 def main() -> None:
