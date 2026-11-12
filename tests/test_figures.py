@@ -177,6 +177,37 @@ def test_author_manuscript_figures_say_where_to_look(config, client, router):
     assert "figures" not in rec.files
 
 
+@pytest.mark.parametrize("ext, mime", [("jpg", "image/jpeg")])
+def test_author_manuscript_figures_from_the_pmc_page(config, client, router, ext, mime):
+    import httpx
+
+    from paperreader.http import Response
+
+    image = f"https://cdn.ncbi.nlm.nih.gov/pmc/blobs/ab12/9/0123456789ab/open-g001.{ext}"
+
+    class FakeBrowser:
+        urls = []
+        wait = None
+
+        def fetch(self, url, human_wait=0.0, may_ask=None):
+            self.urls.append(url)
+            return Response(url, 200, httpx.Headers({"content-type": "text/html"}),
+                            f'<html><body><img src="{image}"></body></html>'.encode())
+
+    config.browser_enabled = True
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/search", json_body={"resultList": {"result": [
+        {"title": "Open data", "pubYear": "2024", "pmcid": "PMC9"}]}})
+    router.add("https://www.ebi.ac.uk/europepmc/webservices/rest/PMC9/fullTextXML",
+               headers={"content-type": "application/xml"}, content=JATS_WITH_FIGURE)
+    router.add(image, headers={"content-type": mime}, content=b"the-image")
+    f = fetcher(config, client)
+    f._browser = FakeBrowser()
+    rec = f.get(parse("PMC9"))  # no zip at Europe PMC, so the article page is opened in the browser
+    assert f._browser.urls == ["https://pmc.ncbi.nlm.nih.gov/articles/PMC9/"]
+    assert f"![Figure 1: Bars.]({rec.key}.figures/open-g001.{ext})" in rec.text_path.read_text()
+    assert (rec.files["figures"] / f"open-g001.{ext}").read_bytes() == b"the-image"
+
+
 def test_renaming_moves_the_figures(tmp_path):
     lib = Library(tmp_path)
     p = Paper(title="Skype me", authors=["Sarah Roseberry"], year=2014, doi="10.1111/cdev.12166")
