@@ -97,7 +97,7 @@ class Found:
 
 
 MAX_IMAGE_DOWNLOADS = 40  # figure images fetched one by one (arXiv HTML without a PDF), per paper
-IMAGE_TYPES = ("image/png", "image/jpeg", "image/gif")
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
 
 @dataclass
@@ -678,7 +678,7 @@ class Fetcher:
         except Exception as e:  # browser errors (timeouts, crashed pages)
             self.log(f"  {'failed':8} {'browser':7} {'figures':16} {page.url}  ({type(e).__name__})")
             return {}
-        links = re.findall(r'"(https://cdn\.ncbi\.nlm\.nih\.gov/pmc/blobs/[^"]+?\.(?:jpe?g|png|gif))"', r.text)
+        links = re.findall(r'"(https://cdn\.ncbi\.nlm\.nih\.gov/pmc/blobs/[^"]+?\.(?:jpe?g|png|gif|webp))"', r.text)
         self.log(f"  {'ok' if links else 'failed':8} {'browser':7} {'figures':16} {page.url}")
         out: dict[str, tuple[str, bytes]] = {}
         for url in dict.fromkeys(links):

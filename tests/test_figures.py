@@ -177,7 +177,7 @@ def test_author_manuscript_figures_say_where_to_look(config, client, router):
     assert "figures" not in rec.files
 
 
-@pytest.mark.parametrize("ext, mime", [("jpg", "image/jpeg")])
+@pytest.mark.parametrize("ext, mime", [("jpg", "image/jpeg"), ("webp", "image/webp")])
 def test_author_manuscript_figures_from_the_pmc_page(config, client, router, ext, mime):
     import httpx
 
