@@ -66,6 +66,15 @@ def test_check_waits_from_the_config(tmp_path):
     assert load(tmp_path / "missing.toml").browser_paper_wait == 180.0
 
 
+def test_download_time_limit_from_the_config(tmp_path):
+    from paperreader.config import load
+
+    path = tmp_path / "config.toml"
+    path.write_text("max_download_seconds = 90\n")
+    assert load(path).max_download_seconds == 90.0
+    assert load(tmp_path / "missing.toml").max_download_seconds == 600.0
+
+
 def test_limit_lookup_matches_parent_domains():
     cfg = Config(limits={"sciencedirect.com": Limit(10.0)}, default_limit=Limit(5.0))
     assert cfg.limit_for("www.sciencedirect.com").interval == 10.0

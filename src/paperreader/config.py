@@ -139,6 +139,8 @@ def _load_file(cfg: Config, path: Path) -> None:
         cfg.library_dir = Path(data["library_dir"]).expanduser()
     if "state_dir" in data:
         cfg.state_dir = Path(data["state_dir"]).expanduser()
+    if "max_download_seconds" in data:
+        cfg.max_download_seconds = float(data["max_download_seconds"])
 
     inst = data.get("institution", {})
     cfg.proxy = inst.get("proxy") or None
@@ -179,6 +181,9 @@ email = ""
 
 # Where downloaded papers (PDF + extracted text + metadata) are stored.
 library_dir = "~/papers"
+
+# Seconds one download may take in all, however slowly the data arrives.
+# max_download_seconds = 600
 
 [institution]
 # Your library's proxy, if it has one. {url} is replaced by the target URL
